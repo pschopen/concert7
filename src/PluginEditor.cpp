@@ -298,9 +298,11 @@ void MainPanel::showWelcome (bool show)
     if (show && welcome == nullptr)
     {
         welcome = std::make_unique<WelcomeOverlay> (processor);
-        welcome->onClose = [this] { MessageManager::callAsync ([safe = SafePointer<MainPanel> (this)] {
-            if (safe != nullptr) safe->showWelcome (false);
-        }); };
+        // the overlay must not delete itself from inside its own button callback
+        SafePointer<MainPanel> safe (this);
+        welcome->onClose = [safe] {
+            MessageManager::callAsync ([safe] { if (safe != nullptr) safe->showWelcome (false); });
+        };
         addAndMakeVisible (*welcome);
         welcome->setBounds (getLocalBounds());
     }
