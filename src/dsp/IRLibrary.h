@@ -49,8 +49,8 @@ struct IRPreset
 class IRLibrary
 {
 public:
-    /** Samplicity's page for the library (download and donation). */
-    static constexpr const char* kDownloadPage = "https://samplicity.com/bricasti-m7-impulse-response-files/";
+    /** Samplicity's downloads page; the library is listed at the bottom ("Bricasti M7 impulse response archive"). */
+    static constexpr const char* kDownloadPage = "https://samplicity.com/downloads/";
 
     struct ParsedName
     {

@@ -799,20 +799,21 @@ void WelcomeOverlay::paint (Graphics& g)
     auto step1 = r.removeFromTop (94.0f).withTrimmedRight (210.0f);
     paintStep (g, step1, 1, installed || pageOpened,
                tr ("Open Samplicity's download page", u8"Download-Seite von Samplicity öffnen"),
-               tr ("Samplicity provides the library for free. If you use it, please support them with a donation "
-                   "on their page.",
-                   u8"Samplicity stellt die Bibliothek kostenlos bereit. Wenn du sie nutzt, unterstütze Samplicity "
-                   u8"bitte mit einer Spende auf der Seite."));
+               tr ("Samplicity provides the library for free. If you use it, you can support them by buying "
+                   "one of their reverb plugins.",
+                   u8"Samplicity stellt die Bibliothek kostenlos bereit. Wenn du sie nutzt, kannst du Samplicity "
+                   u8"mit dem Kauf eines ihrer Reverb-Plugins unterstützen."));
     g.setColour (Colours::accent.withAlpha (0.8f));
     g.setFont (uiFont (12.0f));
-    g.drawText ("samplicity.com/bricasti-m7-impulse-response-files", step1.withTrimmedLeft (44.0f).withTrimmedBottom (14.0f).removeFromBottom (16.0f),
+    g.drawText ("samplicity.com/downloads", step1.withTrimmedLeft (44.0f).withTrimmedBottom (14.0f).removeFromBottom (16.0f),
                 Justification::centredLeft);
 
     auto step2 = r.removeFromTop (58.0f);
     paintStep (g, step2, 2, installed,
-               tr ("Download the ZIP archive (about 1 GB)", u8"ZIP-Archiv herunterladen (ca. 1 GB)"),
-               tr ("No need to unpack it – Concert7 does that for you.",
-                   u8"Entpacken ist nicht nötig – das übernimmt Concert7."));
+               tr ("Download the ZIP archive at the bottom of the page (about 1 GB)",
+                   u8"ZIP-Archiv ganz unten auf der Seite herunterladen (ca. 1 GB)"),
+               tr (u8"Listed as “Bricasti M7 impulse response archive”. No need to unpack it – Concert7 does that for you.",
+                   u8"Eintrag „Bricasti M7 impulse response archive“. Entpacken ist nicht nötig – das übernimmt Concert7."));
 
     auto step3 = r.removeFromTop (30.0f);
     paintStep (g, step3, 3, installed, tr ("Drop the ZIP file into Concert7", u8"ZIP-Datei in Concert7 ablegen"), {});

@@ -110,6 +110,11 @@ function(concert7_configure_target target)
     if(APPLE)
         target_link_libraries(${target} PRIVATE "-framework Accelerate")
     endif()
+    if(MSVC)
+        # sources are UTF-8 without BOM; otherwise MSVC reads them in the ANSI code page and the
+        # German UI texts (umlauts, quotes, dashes) come out garbled
+        target_compile_options(${target} PRIVATE /utf-8)
+    endif()
     if(NOT MSVC)
         # exact float comparisons are intentional (parameter change detection); source level options
         # come after JUCE's recommended warning flags on the command line

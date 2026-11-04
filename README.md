@@ -41,9 +41,10 @@ Get the installer for your system from the [releases page](https://github.com/ps
 ### Impulse responses (required)
 
 Concert7 does **not** ship any impulse responses. It only works with the free Bricasti M7 library by Samplicity.
-Samplicity provides it free of charge – if you use it, please support them with a donation on their page.
+Samplicity provides it free of charge – if you use it, you can support them by buying one of their reverb plugins.
 
-1. Open Samplicity's page: <https://samplicity.com/bricasti-m7-impulse-response-files/>
+1. Open Samplicity's downloads page: <https://samplicity.com/downloads/> – the library is listed at the bottom
+   ("Bricasti M7 impulse response archive").
 2. Download the ZIP archive ("Samplicity - Bricasti IRs version 2023-10.zip", ≈ 1 GB) – no need to unpack it.
 3. Open Concert7 in your DAW and drag the ZIP onto the setup screen (or pick it with "Choose ZIP file…").
    Concert7 checks that it is the Bricasti library and extracts the quad channel files (both sample rates,

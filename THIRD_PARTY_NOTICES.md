@@ -27,7 +27,7 @@ The license texts of the individual components are found in their source files a
 ## Not included
 
 The **Bricasti M7 impulse responses by Samplicity** are *not* part of Concert7 and are not distributed with it.
-Users download them from Samplicity (<https://samplicity.com/bricasti-m7-impulse-response-files/>) and install them
-locally. Samplicity provides the library free of charge – please consider supporting them with a donation.
+Users download them from Samplicity (<https://samplicity.com/downloads/>) and install them
+locally. Samplicity provides the library free of charge – if you use it, you can support them by buying one of their reverb plugins.
 
 Bricasti and M7 are trademarks of their respective owner. Concert7 is not affiliated with Bricasti or Samplicity.

@@ -53,6 +53,3 @@ Source: "..\..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{group}\Concert7"; Filename: "{app}\Concert7.exe"; Components: standalone
 Name: "{group}\Uninstall Concert7"; Filename: "{uninstallexe}"
-
-[Run]
-Filename: "https://samplicity.com/bricasti-m7-impulse-response-files/"; Description: "Open the Samplicity download page (impulse responses)"; Flags: postinstall shellexec skipifsilent unchecked
