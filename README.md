@@ -4,10 +4,12 @@
 [![Release](https://img.shields.io/github/v/release/pschopen/concert7?include_prereleases)](https://github.com/pschopen/concert7/releases)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-**Concert7** is an open source true stereo reverb (AU, VST3, LV2, standalone – macOS, Windows, Linux) built around
+**Concert7** is an open source true stereo reverb (AU, VST3, LV2, standalone – macOS, Windows, Linux) built for
 the free **Bricasti M7 impulse responses recorded by Samplicity**: a hardware-style dot matrix display with banks of
 presets, a big decay control and pages for early/late balance, roll-offs, multi-band decay, delay, ducking and a
 post EQ. Concert7 is an independent project and is not affiliated with Bricasti or Samplicity.
+
+**Website:** <https://pschopen.github.io/concert7/> · **[Documentation of all controls](https://pschopen.github.io/concert7/docs/)**
 
 Concert7 stands on the shoulders of two open source projects, and we are very grateful to their authors:
 **[REEV-R](https://github.com/tiagolr/reevr) by tiagolr**, the convolution reverb Concert7 started from, and
