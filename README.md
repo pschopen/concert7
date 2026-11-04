@@ -40,7 +40,8 @@ Get the installer for your system from the [releases page](https://github.com/ps
 
 ### Impulse responses (required)
 
-Concert7 does **not** ship any impulse responses. It only works with the free Bricasti M7 library by Samplicity.
+Concert7 does **not** ship any impulse responses. It is made for the free Bricasti M7 library by Samplicity
+(your own impulse responses work as well, see below).
 Samplicity provides it free of charge – if you use it, you can support them by buying one of their reverb plugins.
 
 1. Open Samplicity's downloads page: <https://samplicity.com/downloads/> – the library is listed at the bottom
@@ -60,11 +61,17 @@ Already unpacked the archive yourself? Choose that folder instead ("Already unpa
 screen is always available via SETUP → "Install impulse responses (ZIP)…". Concert7 uses the 44.1 kHz files at
 44.1/88.2/176.4 kHz and the 48 kHz files at 48/96/192 kHz; other rates are resampled once when a preset loads.
 
+**Your own impulse responses:** every other WAV, AIFF or FLAC file in the IR folder (subfolders included) shows
+up in the *User* bank. Copy the files into the library folder and use SETUP → "Rescan library", or choose a
+folder of your own. A 4 channel file is used as true stereo (channel order LL, LR, RL, RR), a stereo file as
+L→L / R→R and a mono file on both sides; files at other sample rates are resampled. The ZIP installation only
+accepts the Samplicity archive, and the early patterns are always taken from the Bricasti presets.
+
 ## Features
 
 | Area | Concert7 |
 | --- | --- |
-| Presets | the 134 Samplicity M7 captures (Halls, Plates, Rooms, Chambers, Ambience, Spaces) + any user IR (mono, stereo, quad or L/R pairs) in the IR folder |
+| Presets | the 134 Samplicity M7 captures (Halls, Plates, Rooms, Chambers, Ambience, Spaces) + your own IRs (mono, stereo or 4 channel true stereo) in the IR folder |
 | Decay | 0.2 – 30 s, starts at each preset's analysed native RT60 (optionally held on preset change) |
 | Pre-delay | 0 – 500 ms or tempo synced, applied to the late reverb |
 | Levels | Early, Late and VLF (late reverb below ~120 Hz) |

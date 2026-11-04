@@ -715,13 +715,13 @@ void WelcomeOverlay::paintDropZone (Graphics& g, Rectangle<float> zone)
     }
     else if (state == ZoneState::Done)
     {
-        int bricasti = 0;
-        processor.getShared().withLibrary ([&bricasti] (const IRLibrary& lib) { bricasti = lib.numBricastiPresets(); });
+        int numPresets = 0; // Bricasti and user impulse responses
+        processor.getShared().withLibrary ([&numPresets] (const IRLibrary& lib) { numPresets = (int) lib.getPresets().size(); });
         g.setColour (Colours::accent);
         g.fillEllipse (iconArea.reduced (2.0f));
         g.setColour (Colours::lcdBack);
         drawCheck (g, iconArea.reduced (8.0f));
-        line1 = tr ("Installed", "Installiert") + ": " + String (bricasti) + " " + tr ("presets", "Presets");
+        line1 = tr ("Installed", "Installiert") + ": " + String (numPresets) + " " + tr ("presets", "Presets");
         line2 = shortPath (processor.getShared().getIRFolder());
     }
     else
