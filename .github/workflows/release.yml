@@ -112,6 +112,6 @@ jobs:
             echo "[Samplicity](https://samplicity.com/bricasti-m7-impulse-response-files/) (please consider a donation)"
             echo "and drop the ZIP onto Concert7's setup screen."
           } > notes.md
-          PRE=""
-          case "$VERSION" in 0.*|*-*) PRE="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Concert7 $VERSION" --notes-file notes.md $PRE
+          # published as a regular "Latest" release (the version name shows beta status);
+          # pre-releases never appear in the repository's Releases sidebar
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Concert7 $VERSION" --notes-file notes.md --latest
