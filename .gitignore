@@ -1,0 +1,23 @@
+# build output
+build/
+build-*/
+cmake-build-*/
+out/
+dist/
+CMakeUserPresets.json
+
+# IDEs / OS
+.vscode/
+.idea/
+*.xcodeproj/
+.DS_Store
+Thumbs.db
+__pycache__/
+
+# audio and archives (the impulse responses are never part of the repository)
+*.wav
+*.aif
+*.aiff
+*.flac
+*.zip
+*.rpp-bak

@@ -1,0 +1,14 @@
+Concert7 @VERSION@ - open source true stereo reverb
+
+This installs the Concert7 Audio Unit, VST3 plugin and standalone app (choose the parts under "Customize").
+
+Impulse responses required
+Concert7 does not include impulse responses. After installing, open Concert7 in your DAW and follow the setup
+screen: download the free Bricasti M7 library from Samplicity
+(https://samplicity.com/bricasti-m7-impulse-response-files/) and drop the ZIP file onto the plugin.
+Samplicity provides the library for free - if you use it, please support them with a donation.
+
+Concert7 is free software (GPLv3; the binaries are distributed under the AGPLv3 because they include JUCE).
+Source code and documentation: https://github.com/pschopen/concert7
+
+Concert7 is not affiliated with Bricasti or Samplicity.

@@ -1,0 +1,117 @@
+name: Release
+
+# Push a tag that matches the version in CMakeLists.txt, e.g. v0.1.0-beta, to build the
+# installers for macOS, Windows and Linux and publish them as a GitHub release.
+# "Run workflow" (manual) builds the installers as workflow artifacts without publishing.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS, os: macos-14, cmake_args: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"' }
+          - { name: Windows, os: windows-2022, cmake_args: '' }
+          - { name: Linux, os: ubuntu-22.04, cmake_args: '' }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev \
+            libxrender-dev libgl1-mesa-dev
+
+      - name: Read version
+        shell: bash
+        run: |
+          V=$(sed -n 's/^project(CONCERT7 VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          S=$(sed -n 's/^set(CONCERT7_RELEASE_STAGE "\([^"]*\)").*/\1/p' CMakeLists.txt)
+          if [ -n "$S" ]; then V="$V-$S"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$V" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the version v$V in CMakeLists.txt"
+            exit 1
+          fi
+
+      - name: Configure
+        shell: bash
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCONCERT7_BUILD_DEVTOOLS=OFF ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: packaging/macos/build_pkg.sh "$VERSION" build/Concert7_artefacts/Release dist
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=$env:VERSION" "/DArtefacts=$pwd\build\Concert7_artefacts\Release" "/DOutputDir=$pwd\dist" packaging\windows\concert7.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: packaging/linux/package.sh "$VERSION" build/Concert7_artefacts/Release dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: concert7-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          {
+            awk -v v="## $VERSION" '$0 == v {found=1; next} found && /^## / {exit} found' CHANGELOG.md
+            echo
+            echo "### Installation"
+            echo
+            echo "- **macOS** (Apple Silicon + Intel): \`Concert7-$VERSION-macOS.pkg\` – AU, VST3, standalone"
+            echo "- **Windows** (64 bit): \`Concert7-$VERSION-Windows-Setup.exe\` – VST3, standalone"
+            echo "- **Linux** (x86_64): \`Concert7-$VERSION-Linux-x86_64.tar.gz\` – unpack, run \`./install.sh\` (VST3, LV2, standalone)"
+            echo
+            echo "The installers are not signed. macOS: *System Settings → Privacy & Security → Open Anyway*;"
+            echo "Windows: *More info → Run anyway*. Details in the README."
+            echo
+            echo "**Impulse responses required:** download the free Bricasti M7 library from"
+            echo "[Samplicity](https://samplicity.com/bricasti-m7-impulse-response-files/) (please consider a donation)"
+            echo "and drop the ZIP onto Concert7's setup screen."
+          } > notes.md
+          PRE=""
+          case "$VERSION" in 0.*|*-*) PRE="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Concert7 $VERSION" --notes-file notes.md $PRE

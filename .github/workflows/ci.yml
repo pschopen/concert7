@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS, os: macos-14 }
+          - { name: Windows, os: windows-2022 }
+          - { name: Linux, os: ubuntu-22.04 }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev \
+            libxrender-dev libgl1-mesa-dev xvfb
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      # The impulse responses are not part of the repository, so only the DSP and
+      # file name tests run here; library and processor tests are skipped.
+      - name: Unit tests
+        shell: bash
+        run: |
+          DEV=build/Concert7Dev_artefacts/Release/Concert7Dev
+          if [ -f "$DEV.exe" ]; then DEV="$DEV.exe"; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a "$DEV" test; else "$DEV" test; fi
