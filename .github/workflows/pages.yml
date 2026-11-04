@@ -1,12 +1,13 @@
 name: Pages
 
-# Publishes the website in site/ (plus the screenshot from doc/) to GitHub Pages.
-# One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
+# The website lives in the concert7/concert7.github.io repository (https://concert7.github.io/).
+# This workflow only publishes the redirect pages in site/, so old links to
+# pschopen.github.io/concert7 keep working.
 
 on:
   push:
     branches: [main]
-    paths: ['site/**', 'doc/concert7.png', '.github/workflows/pages.yml']
+    paths: ['site/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -27,15 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assemble site
-        run: |
-          mkdir -p _site
-          cp -R site/. _site/
-          cp doc/concert7.png _site/concert7.png
-
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: site
       - id: deployment
         uses: actions/deploy-pages@v4

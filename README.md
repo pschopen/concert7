@@ -9,7 +9,7 @@ the free **Bricasti M7 impulse responses recorded by Samplicity**: a hardware-st
 presets, a big decay control and pages for early/late balance, roll-offs, multi-band decay, delay, ducking and a
 post EQ. Concert7 is an independent project and is not affiliated with Bricasti or Samplicity.
 
-**Website:** <https://pschopen.github.io/concert7/> · **[Documentation of all controls](https://pschopen.github.io/concert7/docs/)**
+**Website:** <https://concert7.github.io/> · **[Documentation of all controls](https://concert7.github.io/docs/)**
 
 Concert7 stands on the shoulders of two open source projects, and we are very grateful to their authors:
 **[REEV-R](https://github.com/tiagolr/reevr) by tiagolr**, the convolution reverb Concert7 started from, and
