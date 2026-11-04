@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1-beta
+
+- Samplicity now lists the Bricasti M7 library at the bottom of its downloads page
+  (<https://samplicity.com/downloads/>); the setup screen, installers and README point there
+- The installers no longer offer to open the download page, the plugin's setup screen guides you instead
+- Windows: German texts on the setup screen are no longer garbled (umlauts)
+- The setup screen counts your own impulse responses as well (it showed "0 presets" for a folder without
+  Bricasti files)
+- README: describes how your own impulse responses (mono, stereo, 4 channel) are used
+
 ## 0.1.0-beta
 
 First public beta.
