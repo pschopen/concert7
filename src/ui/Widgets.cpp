@@ -32,8 +32,29 @@ Knob::Knob (AudioProcessorValueTreeState& s, const String& id, const String& cap
 
 String Knob::getValueText() const
 {
+    if (overridden) return overrideText;
     if (parameter == nullptr) return {};
     return parameter->getCurrentValueAsText();
+}
+
+void Knob::setDisplayOverride (float value, const String& text)
+{
+    const float pos = parameter != nullptr ? parameter->convertTo0to1 (parameter->getNormalisableRange().snapToLegalValue (value)) : 0.0f;
+    if (overridden && text == overrideText && (float) slider.getProperties()["displayPos"] == pos) return;
+    overridden = true;
+    overrideText = text;
+    slider.getProperties().set ("displayPos", pos);
+    slider.repaint();
+    repaint();
+}
+
+void Knob::clearDisplayOverride()
+{
+    if (! overridden) return;
+    overridden = false;
+    slider.getProperties().remove ("displayPos");
+    slider.repaint();
+    repaint();
 }
 
 void Knob::resized()

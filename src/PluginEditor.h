@@ -54,9 +54,10 @@ private:
     StereoMeter inMeter { "IN" }, outMeter { "OUT" };
 
     // tabs
-    std::array<juce::TextButton, 4> tabButtons;
+    static constexpr int kNumTabs = 6, kDirectTab = 4, kSpaceTab = 5;
+    std::array<juce::TextButton, kNumTabs> tabButtons;
     juce::TextButton setupButton { "SETUP" };
-    std::array<juce::Component, 4> pages;
+    std::array<juce::Component, kNumTabs> pages;
     int currentTab = 0;
 
     // reverb page
@@ -67,6 +68,11 @@ private:
     // decay + eq pages
     DecayView decayView;
     EQView eqView;
+
+    // space page
+    std::unique_ptr<ParamToggle> hallOn, distOn, distAlign, distWidthOn;
+    DistanceView distanceView;
+    juce::Label hallDecayLabel;
 
     std::unique_ptr<WelcomeOverlay> welcome;
     std::unique_ptr<juce::FileChooser> chooser;

@@ -261,6 +261,212 @@ void DecayView::paint (Graphics& g)
 }
 
 //==============================================================================
+// DistanceView
+//==============================================================================
+void DistanceView::paint (Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    g.setColour (Colours::lcdBack);
+    g.fillRoundedRectangle (r, 6.0f);
+    g.setColour (Colours::outline);
+    g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
+
+    // while the mode is off, everything shows where the current mix places the source
+    const bool on = processor.isDistanceOn();
+    const auto ds = processor.getDistanceState();
+    const auto& model = ds.model;
+    const auto& d = ds.result;
+    const bool hallOn = processor.isHallOn();
+    const float mix = processor.getAPVTS().getRawParameterValue (ParamID::mix)->load();
+    // source parts follow the distance mode, the hall follows the hall model
+    const float dim = on ? 1.0f : 0.5f, hallDim = on || hallOn ? 1.0f : 0.5f;
+    auto col = [dim] (Colour c, float alpha = 1.0f) { return c.withMultipliedAlpha (alpha * dim); };
+    auto colH = [hallDim] (Colour c, float alpha = 1.0f) { return c.withMultipliedAlpha (alpha * hallDim); };
+
+    auto inner = r.reduced (10.0f, 8.0f);
+
+    // ---- values
+    auto values = inner.removeFromRight (124.0f);
+    values.removeFromTop (2.0f);
+    auto row = [&] (const String& name, const String& value, bool hallValue = false) {
+        auto line = values.removeFromTop (27.0f);
+        const float rowDim = hallValue ? hallDim : dim;
+        g.setColour (Colours::textFaint.withMultipliedAlpha (1.4f * rowDim));
+        g.setFont (labelFont (8.5f));
+        g.drawText (name, line.removeFromTop (12.0f), Justification::left);
+        g.setColour (Colours::lcdOn.withMultipliedAlpha (rowDim));
+        g.setFont (uiFont (12.5f));
+        g.drawText (value, line, Justification::left);
+    };
+    const String drr = ds.drrDb >= 99.0f ? String ("direct only") : ds.drrDb <= -99.0f ? String ("reverb only")
+                     : (ds.drrDb > 0.05f ? "+" : "") + String (ds.drrDb, 1) + " dB";
+    Biquad shelf;
+    shelf.highShelf (48000.0, kPresenceShelfHz, 0.6, d.presenceDb);
+    const float highsDb = (float) (Decibels::gainToDecibels (shelf.magnitude (8000.0, 48000.0))
+                                   - airAbsorptionDbPerMetre (8000.0, kAirHumidity) * d.airMetres);
+    row ("DIRECT / REVERB", drr);
+    row ("CRITICAL DISTANCE", formatMetres (ds.criticalDistance));
+    row ("FIRST REFLECTION", String (ds.firstReflectionMs, 1) + " ms");
+    row ("DIRECT AT 8 KHZ", std::abs (highsDb) < 0.05f ? String ("0.0 dB") : (highsDb > 0.0f ? "+" : "") + String (highsDb, 1) + " dB");
+    row ("HALL VOLUME", formatVolume (d.volume), true);
+    row ("ABSORPTION", describeAbsorption (processor.getHallAbsorption()), true);
+    inner.removeFromRight (8.0f);
+
+    // ---- top view of a shoebox hall (length 2 W, width W), stage on the left, in metres.
+    // The full width always fits; the back of the hall is cut off only while nothing happens there.
+    const auto plot = inner;
+    const float W = hallWidthForVolume (d.volume), L = 2.0f * W;
+    const float stageDepth = std::min (0.18f * L, 12.0f);
+    const float sourceX = 0.55f * stageDepth;
+    float scale = plot.getHeight() / W;
+    const float reach = sourceX + 1.15f * std::max ({ model.distance, model.referenceDistance, ds.criticalDistance });
+    if (std::max (L, reach) * scale > plot.getWidth() && reach * scale > plot.getWidth())
+        scale = std::min (plot.getWidth() / L, plot.getHeight() / W);
+    Point<float> origin (plot.getX(), plot.getCentreY());   // stage wall on the centre line
+    if (L * scale < plot.getWidth())
+        origin.x = plot.getCentreX() - 0.5f * L * scale;
+    auto at = [&] (float x, float y) { return Point<float> (origin.x + x * scale, origin.y + y * scale); };
+    const auto hall = Rectangle<float> (at (0.0f, -0.5f * W), at (L, 0.5f * W));
+
+    Graphics::ScopedSaveState clip (g);
+    g.reduceClipRegion (plot.toNearestInt());
+
+    // floor, seating in two blocks with a centre aisle, balcony fronts (the side reflectors of the model)
+    g.setColour (colH (Colours::lcdOff, 0.55f));
+    g.fillRect (hall);
+    const float rowStep = scale >= 4.0f ? 1.0f : 2.0f;
+    g.setColour (colH (Colours::textFaint, 0.45f));
+    for (float x = stageDepth + 2.5f; x < L - 1.5f; x += rowStep)
+        for (float side : { -1.0f, 1.0f })
+            g.drawLine (Line<float> (at (x, side * 1.0f), at (x, side * 0.46f * W)), 1.0f);
+    const float pattern[] = { 4.0f, 3.0f };
+    for (float side : { -1.0f, 1.0f })
+    {
+        const float y = side * kNearestReflectorFraction * W;
+        g.setColour (colH (Colours::textDim, 0.7f));
+        g.drawDashedLine (Line<float> (at (stageDepth, y), at (L, y)), pattern, 2, 1.0f);
+    }
+
+    // stage with a curved front
+    Path stage;
+    stage.startNewSubPath (at (0.0f, -0.42f * W));
+    stage.lineTo (at (stageDepth, -0.42f * W));
+    stage.quadraticTo (at (stageDepth * 1.25f, 0.0f), at (stageDepth, 0.42f * W));
+    stage.lineTo (at (0.0f, 0.42f * W));
+    stage.closeSubPath();
+    g.setColour (colH (Colours::accentDim, 0.55f));
+    g.fillPath (stage);
+    g.setColour (colH (Colours::accentDim));
+    g.strokePath (stage, PathStrokeType (1.0f));
+
+    g.setColour (colH (Colours::textDim));
+    g.drawRect (hall, 2.0f);
+
+    const auto src = at (sourceX, 0.0f);
+    const float micX = std::min (sourceX + model.distance, L - 1.0f);
+    const bool beyond = sourceX + model.distance > L - 1.0f;
+    const auto mic = at (micX, 0.0f);
+
+    // critical distance: inside the circle the direct sound is louder than the reverb
+    const float rc = ds.criticalDistance * scale;
+    Path circle;
+    circle.addEllipse (src.x - rc, src.y - rc, 2.0f * rc, 2.0f * rc);
+    Path dashedCircle;
+    PathStrokeType (1.0f).createDashedStroke (dashedCircle, circle, pattern, 2);
+    g.setColour (col (Colours::accent, 0.08f));
+    g.fillPath (circle);
+    g.setColour (col (Colours::accent, 0.7f));
+    g.fillPath (dashedCircle);
+    g.setFont (labelFont (8.0f));
+    auto rcLabel = Rectangle<float> (64.0f, 10.0f).withCentre ({ src.x, src.y - rc - 7.0f });
+    rcLabel.setX (std::max (rcLabel.getX(), plot.getX() + 2.0f));
+    if (plot.contains (rcLabel.getTopLeft()))
+        g.drawText ("RC " + formatMetres (ds.criticalDistance), rcLabel, Justification::centred);
+
+    // first reflection via the nearest balcony front
+    Path reflection;
+    reflection.startNewSubPath (src);
+    reflection.lineTo (at (0.5f * (sourceX + micX), -kNearestReflectorFraction * W));
+    reflection.lineTo (mic);
+    Path dashedReflection;
+    const float dots[] = { 2.0f, 3.0f };
+    PathStrokeType (1.0f).createDashedStroke (dashedReflection, reflection, dots, 2);
+    g.setColour (col (Colours::lcdOn, 0.6f));
+    g.fillPath (dashedReflection);
+
+    // direct sound with its length
+    g.setColour (col (Colours::lcdOn));
+    g.drawLine (Line<float> (src, mic), 1.5f);
+    g.setFont (uiFont (11.0f));
+    const String length = formatMetres (model.distance) + (beyond ? " >" : "");
+    if (mic.x - src.x > 70.0f)
+        g.drawText (length, Rectangle<float> (0.5f * (src.x + mic.x) - 40.0f, src.y - 17.0f, 80.0f, 13.0f), Justification::centred);
+    else
+        g.drawText (length, Rectangle<float> (mic.x + 20.0f, src.y - 6.5f, 60.0f, 13.0f), Justification::left);
+
+    // where the source sounds like the unchanged preset
+    if (on)
+    {
+        const auto ref = at (std::min (sourceX + model.referenceDistance, L - 1.0f), 0.0f);
+        Path tri;
+        tri.addTriangle (ref.x, ref.y + 4.0f, ref.x - 4.0f, ref.y + 10.0f, ref.x + 4.0f, ref.y + 10.0f);
+        g.setColour (col (Colours::textDim));
+        g.fillPath (tri);
+        g.setFont (labelFont (7.5f));
+        g.drawText ("START", Rectangle<float> (ref.x - 20.0f, ref.y + 11.0f, 40.0f, 10.0f), Justification::centred);
+    }
+
+    // loudspeaker on the stage, facing the hall
+    {
+        const float s = 6.0f;
+        Path box, cone;
+        box.addRoundedRectangle (src.x - 1.6f * s, src.y - s, 1.2f * s, 2.0f * s, 1.5f);
+        cone.startNewSubPath (src.x - 0.4f * s, src.y - 0.55f * s);
+        cone.lineTo (src.x + 0.9f * s, src.y - 1.3f * s);
+        cone.lineTo (src.x + 0.9f * s, src.y + 1.3f * s);
+        cone.lineTo (src.x - 0.4f * s, src.y + 0.55f * s);
+        cone.closeSubPath();
+        g.setColour (col (Colours::lcdBack));
+        g.fillPath (box);
+        g.fillPath (cone);
+        g.setColour (col (Colours::lcdOn));
+        g.strokePath (box, PathStrokeType (1.3f));
+        g.strokePath (cone, PathStrokeType (1.3f));
+    }
+
+    // microphone pointing at the stage: capsule with grille, body behind it
+    {
+        const float s = 5.0f;
+        const auto body = Rectangle<float> (mic.x + 0.6f * s, mic.y - 0.55f * s, 2.4f * s, 1.1f * s);
+        g.setColour (col (Colours::lcdBack));
+        g.fillRoundedRectangle (body, 1.5f);
+        g.fillEllipse (mic.x - s, mic.y - s, 2.0f * s, 2.0f * s);
+        g.setColour (col (Colours::lcdOn));
+        g.drawRoundedRectangle (body, 1.5f, 1.3f);
+        g.drawEllipse (mic.x - s, mic.y - s, 2.0f * s, 2.0f * s, 1.3f);
+        for (float k : { -0.45f, 0.0f, 0.45f })
+            g.drawLine (mic.x + k * s, mic.y - 0.8f * s, mic.x + k * s, mic.y + 0.8f * s, 0.8f);
+    }
+
+    // status line
+    g.setFont (labelFont (8.5f));
+    auto status = plot.reduced (4.0f, 3.0f).removeFromBottom (11.0f);
+    g.setColour (Colours::lcdBack.withAlpha (0.8f));
+    g.fillRect (status.withWidth (std::min (status.getWidth(), 230.0f)).expanded (3.0f, 1.0f));
+    g.setColour (on ? Colours::textDim : Colours::text.withAlpha (0.8f));
+    String text;
+    if (on)
+        text = "START " + formatMetres (model.referenceDistance) + "  >  " + formatMetres (model.distance);
+    else if (mix >= 99.9f)
+        text = "OFF - MIX 100 %: REVERB ONLY";
+    else if (mix <= 0.1f)
+        text = "OFF - MIX 0 %: DIRECT ONLY";
+    else
+        text = "OFF - YOUR MIX SITS AT " + formatMetres (model.distance);
+    g.drawText (text, status, Justification::left);
+}
+
+//==============================================================================
 // EQView
 //==============================================================================
 const EQView::Node EQView::nodes[5] = {

@@ -4,6 +4,7 @@
 #include "IRDesigner.h"
 #include "../Parameters.h"
 #include "AudioFFT.h"
+#include "PostProcessing.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <cmath>
 #include <algorithm>
@@ -721,6 +722,7 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     out->name = src.name;
     out->nativeRT = src.nativeRT;
     out->targetRT = p.decay;
+    out->onsetMs = (float) (1000.0 * src.onset / src.sampleRate);
     if (len <= 0) return out;
 
     const std::vector<int> chans = src.trueStereo ? std::vector<int> { 0, 1, 2, 3 } : std::vector<int> { 0, 3 };
@@ -1047,6 +1049,38 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
             for (int n = 0; n < fadeLen; ++n)
                 o[(size_t) (total - 1 - n)] *= (float) n / fadeLen;
         }
+    }
+
+    // mid band energy for the distance mode (the level of the reverb against the direct sound)
+    {
+        auto midBandEnergy = [&] (const std::vector<float>& x) {
+            std::array<Biquad, 4> f;
+            f[0].highPass (sr, 500.0, 0.7071); f[1].highPass (sr, 500.0, 0.7071);
+            f[2].lowPass (sr, 2000.0, 0.7071); f[3].lowPass (sr, 2000.0, 0.7071);
+            double e = 0.0;
+            for (float v : x)
+            {
+                for (auto& b : f) v = b.process (v, 0);
+                e += (double) v * v;
+            }
+            // filter ringing after the end of the response
+            for (int n = 0; n < (int) (0.05 * sr); ++n)
+            {
+                float v = 0.0f;
+                for (auto& b : f) v = b.process (v, 0);
+                e += (double) v * v;
+            }
+            return e;
+        };
+        std::vector<float> impulse ((size_t) (0.05 * sr), 0.0f);
+        impulse[0] = 1.0f;
+        const double ref = midBandEnergy (impulse);
+        std::array<double, 4> e {};
+        for (int c : chans)
+            e[(size_t) c] = midBandEnergy (out->ch[(size_t) c]) / ref;
+        // each output channel receives two paths (L->L + R->L, L->R + R->R)
+        out->midEnergy = (float) ((e[0] + e[1] + e[2] + e[3]) * 0.5);
+        out->midEnergyDiagonal = (float) ((e[0] + e[3]) * 0.5);
     }
     out->seconds = (float) (total / sr);
 

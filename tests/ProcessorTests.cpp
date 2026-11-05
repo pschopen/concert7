@@ -6,6 +6,7 @@
 #include "TestHelpers.h"
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "dsp/PostProcessing.h"
 
 namespace concert7::test
 {
@@ -109,11 +110,39 @@ public:
             proc.getShared().setHoldDecay (false);
         }
 
+        beginTest ("choosing a preset, also the current one again, resets all parameters");
+        {
+            setParam (proc, ParamID::predelay, 42.0f);
+            setParam (proc, ParamID::eqMidGain, -4.0f);
+            setParam (proc, ParamID::hallOn, 1.0f);
+            setParam (proc, ParamID::distOn, 1.0f);
+            settle (proc);
+            proc.selectPreset ("Rooms/01 Studio A", true);
+            settle (proc);
+            for (auto* prm : proc.getParameters())
+                if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
+                    if (rp->paramID != ParamID::decay)
+                        expectWithinAbsoluteError (rp->getValue(), rp->getDefaultValue(), 1.0e-6f, rp->paramID);
+            const auto st = proc.getStatus();
+            expectWithinAbsoluteError (getParam (proc, ParamID::decay), jlimit (0.2f, 30.0f, st.nativeRT), 0.02f);
+
+            setParam (proc, ParamID::mix, 80.0f);
+            setParam (proc, ParamID::decay, 7.0f);
+            settle (proc);
+            proc.selectPreset (proc.getPresetId(), true);
+            settle (proc);
+            expectWithinAbsoluteError (getParam (proc, ParamID::mix), proc.getAPVTS().getParameter (ParamID::mix)->convertFrom0to1 (
+                proc.getAPVTS().getParameter (ParamID::mix)->getDefaultValue()), 1.0e-4f);
+            expectWithinAbsoluteError (getParam (proc, ParamID::decay), jlimit (0.2f, 30.0f, st.nativeRT), 0.02f);
+        }
+
         beginTest ("state save / restore");
         {
             setParam (proc, ParamID::predelay, 42.0f);
             setParam (proc, ParamID::lateRolloff, 5000.0f);
             setParam (proc, ParamID::eqMidGain, -4.0f);
+            setParam (proc, ParamID::decay, 5.0f);
+            settle (proc);
             MemoryBlock state;
             proc.getStateInformation (state);
 
@@ -235,6 +264,172 @@ public:
             setParam (mono, ParamID::mix, 100.0f);
             mono.processBlock (buf, midi);
             expect (std::isfinite (buf.getMagnitude (0, 128)));
+        }
+
+        beginTest ("distance mode: switching on keeps the sound, moving closer follows the model");
+        {
+            for (auto* prm : proc.getParameters())
+                if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
+                    if (rp->paramID != ParamID::decay)
+                        rp->setValueNotifyingHost (rp->getDefaultValue());
+            proc.selectPreset ("Halls/01 Large Hall", true);
+            settle (proc);
+            const double sr = 48000.0;
+            const int len = 4 * (int) sr;
+            auto renderImpulse = [&] {
+                AudioBuffer<float> buf (2, len);
+                MidiBuffer midi;
+                // let earlier tails die away
+                for (int pos = 0; pos < 10 * (int) sr; pos += 512)
+                {
+                    AudioBuffer<float> silence (2, 512);
+                    silence.clear();
+                    proc.processBlock (silence, midi);
+                }
+                buf.clear();
+                buf.setSample (0, 0, 1.0f);   // centred source
+                buf.setSample (1, 0, 1.0f);
+                for (int pos = 0; pos < len; pos += 512)
+                {
+                    AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, pos, std::min (512, len - pos));
+                    proc.processBlock (view, midi);
+                }
+                return buf;
+            };
+            auto midBandDrr = [&] (const AudioBuffer<float>& buf, int split) {
+                double direct = 0.0, reflected = 0.0;
+                for (int c = 0; c < 2; ++c)
+                {
+                    std::array<Biquad, 4> f;
+                    f[0].highPass (sr, 500.0, 0.7071); f[1].highPass (sr, 500.0, 0.7071);
+                    f[2].lowPass (sr, 2000.0, 0.7071); f[3].lowPass (sr, 2000.0, 0.7071);
+                    for (int i = 0; i < len; ++i)
+                    {
+                        float v = buf.getSample (c, i);
+                        for (auto& b : f) v = b.process (v, 0);
+                        (i < split ? direct : reflected) += (double) v * v;
+                    }
+                }
+                return 10.0 * std::log10 (direct / reflected);
+            };
+
+            const auto before = renderImpulse();
+            const float shownWhileOff = proc.getDistanceModel().distance;
+            setParam (proc, ParamID::distOn, 1.0f);
+            settle (proc);
+            const auto atStart = proc.getDistanceState();
+            expectWithinAbsoluteError (getParam (proc, ParamID::distance), atStart.model.referenceDistance, 0.01f,
+                                       "the distance knob starts at the reference");
+            expectWithinAbsoluteError (atStart.direct.mix, 0.3f, 1.0e-4f, "greyed MIX shows the mix in effect");
+            expectWithinAbsoluteError (atStart.model.referenceDistance, shownWhileOff, 1.0e-4f,
+                                       "switching on starts where the greyed display showed the mix");
+            expectWithinAbsoluteError (atStart.direct.gapMs, 0.0f, 0.01f);
+            const auto after = renderImpulse();
+            double signal = 0.0, diff = 0.0;
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < len; ++i)
+                {
+                    const double a = before.getSample (c, i), b = after.getSample (c, i);
+                    signal += a * a;
+                    diff += (a - b) * (a - b);
+                }
+            const double diffDb = 10.0 * std::log10 (diff / signal + 1e-30);
+            logMessage ("  difference after switching on: " + String (diffDb, 1) + " dB");
+            expectLessThan (diffDb, -100.0, "switching the mode on does not change the sound");
+            const double drrStart = midBandDrr (after, roundToInt (atStart.firstReflectionMs * 0.001 * sr));
+            logMessage ("  reference " + String (atStart.model.referenceDistance, 2) + " m, ratio " + String (drrStart, 1)
+                        + " dB (shown " + String (atStart.drrDb, 1) + " dB)");
+            expectWithinAbsoluteError (drrStart, (double) atStart.drrDb, 1.0);
+
+            setParam (proc, ParamID::distance, atStart.model.referenceDistance * 0.5f);
+            settle (proc);
+            const auto closer = proc.getDistanceState();
+            expectGreaterThan (closer.direct.gapMs, atStart.direct.gapMs, "closer: the first reflection comes later");
+            expectGreaterThan (closer.direct.mix, 0.0f);
+            expectLessThan (closer.direct.mix, atStart.direct.mix, "closer: less reverb");
+            expectGreaterThan (closer.direct.highsDb, 0.0f, "closer: more presence");
+            const auto near = renderImpulse();
+            const int gap = roundToInt (closer.direct.gapMs * 0.001 * sr);
+            expectLessThan (near.getMagnitude (0, 96, gap - 144), 1e-4f, "silence between direct sound and the reverb");
+            const double drrNear = midBandDrr (near, roundToInt (closer.firstReflectionMs * 0.001 * sr));
+            logMessage ("  half the distance: ratio " + String (drrNear, 1) + " dB, model change "
+                        + String (closer.result.drrChangeDb, 1) + " dB");
+            expectWithinAbsoluteError (drrNear - drrStart, (double) closer.result.drrChangeDb, 1.0);
+
+            // the reference survives save / restore
+            MemoryBlock saved;
+            proc.getStateInformation (saved);
+            Concert7Processor restored;
+            restored.setStateInformation (saved.getData(), (int) saved.getSize());
+            expectWithinAbsoluteError (restored.getDistanceModel().referenceDistance, atStart.model.referenceDistance, 1.0e-4f);
+            expectWithinAbsoluteError (getParam (restored, ParamID::distance), atStart.model.referenceDistance * 0.5f, 0.01f,
+                                       "restoring does not reset the distance");
+
+            // switching off hands the values in effect to MIX and DIRECT: the sound stays
+            setParam (proc, ParamID::distOn, 0.0f);
+            settle (proc);
+            expectWithinAbsoluteError (getParam (proc, ParamID::mix), closer.direct.mix * 100.0f, 0.01f);
+            expectWithinAbsoluteError (getParam (proc, ParamID::directHighs), closer.direct.highsDb, 0.01f);
+            expectWithinAbsoluteError (getParam (proc, ParamID::directGap), closer.direct.gapMs, 0.01f);
+            const auto handedBack = renderImpulse();
+            double nearEnergy = 0.0, diffEnergy = 0.0;
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < len; ++i)
+                {
+                    const double a = near.getSample (c, i), b = handedBack.getSample (c, i);
+                    nearEnergy += a * a;
+                    diffEnergy += (a - b) * (a - b);
+                }
+            const double handbackDb = 10.0 * std::log10 (diffEnergy / nearEnergy + 1e-30);
+            logMessage ("  difference after switching off: " + String (handbackDb, 1) + " dB");
+            expectLessThan (handbackDb, -80.0, "switching the mode off does not change the sound");
+        }
+
+        beginTest ("hall model: volume and absorption drive the decay, switching keeps it");
+        {
+            for (auto* prm : proc.getParameters())
+                if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
+                    if (rp->paramID != ParamID::decay)
+                        rp->setValueNotifyingHost (rp->getDefaultValue());
+            proc.selectPreset ("Halls/01 Large Hall", true);
+            settle (proc);
+            const float native = getParam (proc, ParamID::decay);
+
+            setParam (proc, ParamID::hallOn, 1.0f);
+            settle (proc);
+            const float volume = getParam (proc, ParamID::hallVolume);
+            expectWithinAbsoluteError (volume, estimateHallVolume (native), volume * 1.0e-3f, "starts at the estimate");
+            expectWithinAbsoluteError (proc.getEffectiveDecay(), native, native * 2.0e-3f, "switching on keeps the decay");
+            expectWithinAbsoluteError (proc.getCurrentIR()->targetRT, native, native * 2.0e-3f);
+            logMessage ("  Large Hall: " + formatVolume (volume) + ", absorption " + formatAbsorption (getParam (proc, ParamID::hallAbsorption)));
+
+            setParam (proc, ParamID::hallAbsorption, 0.4f);
+            settle (proc);
+            const float drier = eyringRt60 (volume, 0.4f);
+            expectLessThan (drier, native, "more absorption: shorter");
+            expectWithinAbsoluteError (proc.getCurrentIR()->targetRT, drier, drier * 2.0e-3f);
+            setParam (proc, ParamID::hallVolume, volume * 2.0f);
+            settle (proc);
+            const float bigger = eyringRt60 (volume * 2.0f, 0.4f);
+            expectGreaterThan (bigger, drier, "larger: longer");
+            expectWithinAbsoluteError (proc.getCurrentIR()->targetRT, bigger, bigger * 2.0e-3f);
+
+            proc.getShared().setHoldDecay (true);
+            proc.selectPreset ("Rooms/01 Studio A", true);
+            settle (proc);
+            expect (! proc.isHallOn(), "a new preset switches the hall model off");
+            expectWithinAbsoluteError (proc.getCurrentIR()->targetRT, bigger, bigger * 2.0e-3f, "a held decay keeps the hall's decay");
+            proc.getShared().setHoldDecay (false);
+
+            setParam (proc, ParamID::hallOn, 1.0f);
+            settle (proc);
+            setParam (proc, ParamID::hallVolume, getParam (proc, ParamID::hallVolume) * 2.0f);
+            settle (proc);
+            const float hallDecay = proc.getEffectiveDecay();
+            setParam (proc, ParamID::hallOn, 0.0f);
+            settle (proc);
+            expectWithinAbsoluteError (getParam (proc, ParamID::decay), hallDecay, hallDecay * 2.0e-3f, "switching off keeps the decay");
+            expectWithinAbsoluteError (proc.getCurrentIR()->targetRT, hallDecay, hallDecay * 2.0e-3f);
         }
 
         beginTest ("editor opens and paints");

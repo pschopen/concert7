@@ -64,6 +64,24 @@ namespace ParamID
     inline constexpr const char* eqHighQ       = "eqHighQ";
     inline constexpr const char* eqLpOn        = "eqLpOn";
     inline constexpr const char* eqLpFreq      = "eqLpFreq";
+
+    // direct sound (the dry signal) and the gap before the reverb
+    inline constexpr const char* directHighs   = "directHighs";
+    inline constexpr const char* directAir     = "directAir";
+    inline constexpr const char* directWidth   = "directWidth";
+    inline constexpr const char* directDelay   = "directDelay";
+    inline constexpr const char* directGap     = "directGap";
+
+    // space: hall model (volume + absorption drive the decay) and distance mode
+    inline constexpr const char* hallOn        = "hallOn";
+    inline constexpr const char* hallVolume    = "hallVolume";
+    inline constexpr const char* hallAbsorption = "hallAbsorption";
+    inline constexpr const char* distOn        = "distOn";
+    inline constexpr const char* distance      = "distance";
+    inline constexpr const char* distMic       = "distMic";
+    inline constexpr const char* distWidthOn   = "distWidthOn";
+    inline constexpr const char* distWidth     = "distWidth";
+    inline constexpr const char* distAlign     = "distAlign";
 }
 
 // Level controls use their minimum value as "off"
@@ -96,4 +114,7 @@ juce::String formatSeconds (float s);
 juce::String formatHz (float hz);
 juce::String formatRolloff (float hz);
 juce::String formatDb (float db, float offBelowOrAt = -1000.0f);
+juce::String formatMetres (float m);
+juce::String formatVolume (float cubicMetres);
+juce::String formatAbsorption (float absorption);
 } // namespace concert7

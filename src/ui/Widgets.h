@@ -20,6 +20,11 @@ public:
     void paint (juce::Graphics&) override;
 
     juce::Slider& getSlider() { return slider; }
+
+    /** Shows a value other than the parameter's, e.g. on a greyed knob another mode is driving.
+        The parameter itself is left alone (no automation is written). */
+    void setDisplayOverride (float value, const juce::String& text);
+    void clearDisplayOverride();
     const juce::String& getParamID() const { return paramID; }
     juce::String getValueText() const;
     juce::String getCaption() const { return caption; }
@@ -37,6 +42,8 @@ private:
     juce::String paramID, caption;
     juce::RangedAudioParameter* parameter = nullptr;
     juce::Slider slider;
+    bool overridden = false;
+    juce::String overrideText;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
 };
 

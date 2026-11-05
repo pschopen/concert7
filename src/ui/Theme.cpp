@@ -74,6 +74,8 @@ void Concert7LookAndFeel::drawRotarySlider (Graphics& g, int x, int y, int w, in
     const float size = std::min (bounds.getWidth(), bounds.getHeight());
     const auto c = bounds.getCentre();
     const float r = size * 0.5f;
+    if (auto* shown = slider.getProperties().getVarPointer ("displayPos"))
+        pos = (float) *shown;   // value driven by another mode (see Knob::setDisplayOverride)
     const float angle = start + pos * (end - start);
     const bool bipolar = slider.getProperties()["bipolar"];
     const bool enabled = slider.isEnabled();

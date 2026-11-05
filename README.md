@@ -84,6 +84,8 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Propagation | True Stereo, No Crossfeed (L→L / R→R), Mono In |
 | Modulation | depth / rate vibrato on the wet signal (EXTRAS tab) |
 | Smooth | 0 – 100 %, evens out resonances, ringing and bumps in the decay of the late reverb (EXTRAS tab) |
+| Space | hall model: volume (m³) and absorption (stone church … studio) set the decay (Eyring); distance: places a dry source 0.5 – 60 m away – direct to reverberant ratio, presence, air absorption, gap before the first reflection, optional source width and time alignment (SPACE tab) |
+| Direct | tone (HIGHS shelf, AIR absorption), WIDTH and DELAY of the dry signal, REVERB GAP of the whole reverb against it – by hand or set by the distance mode (DIRECT tab) |
 | Interface | scalable UI (75 – 200 %), meters, dot matrix display with decay envelope, English / German setup screen |
 | Latency | zero (non-uniform partitioned convolution, tail on a background thread) |
 
@@ -92,6 +94,9 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 - Changing an IR parameter rebuilds the impulse response in the background; the new reverb fades in after a moment.
 - Presets with an abrupt, gated envelope keep their cut-off when lengthened and get a longer tail after it.
 - The interface uses the system font, so it looks slightly different on Windows and Linux.
+- Distance mode treats the input as the direct sound and the impulse response as everything the hall adds (true for
+  the Bricasti library). Own impulse responses that contain a direct sound keep it. Use the mode as an insert on a dry
+  source, not on an effect send.
 - Not (yet) implemented: surround/Atmos, a low CPU mode, user presets (settings are stored with the DAW project).
 - Tested by hand on macOS (REAPER 7, auval). Windows and Linux builds are compiled and unit tested by CI only.
 
@@ -112,6 +117,49 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    pulls each band envelope towards its fitted decay line.
 4. **Assembly**: early part (own or from the selected pattern, with roll-off), late part shifted by the pre-delay,
    plus delay voices.
+
+**SPACE tab** (`src/dsp/Distance.cpp`): two optional ways to set Concert7 in terms of a real hall. Both start from
+the current sound when switched on, and while off their greyed knobs show the values that match it.
+
+**Hall model** sets the reverb by the size of the hall and how much it absorbs. The decay follows from Eyring's
+formula T = 0.161 V / (−S ln(1−α)) for a shoebox hall (length 2 W, height 0.8 W) and DECAY is greyed out. Switching
+it on keeps the decay (the volume starts at an estimate, 2 s ≈ 16 000 m³, the absorption at the value that gives the
+current decay – about 0.27 for the Bricasti halls, a typical occupied concert hall); switching it off hands the decay
+back to DECAY. The absorption is shown as a room type (stone church, bare hall, empty hall, concert hall, opera house,
+studio). It sets the mid band decay only – the frequency balance stays the preset's and the multi-band decay's – and,
+like DECAY, it rebuilds the impulse response. A larger volume lengthens the reverb but does not move the preset's
+early reflections, so it works best with the hall presets.
+
+**Distance mode** moves a dry source nearer or further away – a calibrated depth control for spot microphones and
+dry recordings. The Bricasti responses contain no direct sound, so the dry input is treated as the direct sound and
+the convolution as everything the hall adds. Everything the mode does is expressed in ordinary controls – MIX and
+the DIRECT tab (HIGHS, AIR, WIDTH, DELAY, REVERB GAP) – which are greyed out and show the values in effect while it
+is on. While it is off, the SPACE tab shows where your current mix places the source (the distance at which the
+model gives the same direct to reverberant ratio). Switching it on starts exactly there without changing the sound,
+every change is applied relative to the values the controls had, and switching it off hands the values in effect
+back to the controls – nothing jumps either way, and everything can be fine-tuned by hand afterwards.
+
+- **Direct to reverberant ratio** follows Barron's revised theory (Barron & Lee 1988), which matches measurements in
+  concert halls: direct energy 100/r², reflected energy (31200 T/V)·e^(−0.04 r/T). The starting point is calibrated
+  against the energy of the built impulse response in the 500 Hz – 2 kHz band; the ratio change moves MIX through its
+  normal mix law, so the level behaves exactly as if you turned MIX. The hall volume is the hall model's (or its
+  estimate while the hall model is off).
+- **HIGHS** (near field timbre): a close microphone hears more presence and air than a seat in the hall. A gentle
+  high shelf (3 kHz, about 1.5 dB per doubling of the distance, −6 … +3 dB) follows what engineers do by ear – a
+  heuristic, not physics.
+- **AIR**: air absorption of the direct sound over the extra path after ISO 9613-1 (20 °C, 50 % humidity), as a
+  short minimum phase FIR (no latency); the knob shows the loss at 10 kHz. It is subtle at hall distances.
+- **REVERB GAP** (gap before the first reflection) from a shoebox hall (balcony fronts about a third of the hall
+  width from the centre line): closer than the start the whole reverb starts later. Further away the gap stays – the
+  impulse response is never cut, and the Bricasti halls already start within a few ms. PRE-DELAY (late reverb only)
+  stays yours.
+- Optional: **WIDTH** narrows the direct sound to the angle a source of SRC WIDTH covers, around the source's own
+  panorama position (wide, decorrelated sources lose up to ≈ 3 dB when narrowed strongly); **DELAY** with time align
+  adds the travel time from MIC DIST to the distance (spot microphones against a main pair).
+
+The distances are nominal: they follow from the model and the estimated volume, not from a measured hall, and the
+perspective of the reverb itself (one capture per preset) does not change. The mode runs in real time and never
+rebuilds the impulse response.
 
 The rebuilt IR is loaded on a worker thread into a second true stereo convolver (4 paths LL/LR/RL/RR), warmed up
 with the last seconds of input so the new tail is already ringing, and cross-faded in (80 ms). Offline renders

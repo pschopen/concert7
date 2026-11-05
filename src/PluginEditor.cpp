@@ -10,12 +10,12 @@ using namespace juce;
 namespace
 {
     constexpr int kFaceHeight = 172;
-    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS" };
+    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS", "DIRECT", "SPACE" };
 }
 
 //==============================================================================
 MainPanel::MainPanel (Concert7Processor& p)
-    : processor (p), state (p.getAPVTS()), decayView (p.getAPVTS()), eqView (p.getAPVTS(), p)
+    : processor (p), state (p.getAPVTS()), decayView (p.getAPVTS()), eqView (p.getAPVTS(), p), distanceView (p)
 {
     setLookAndFeel (&lnf);
 
@@ -48,7 +48,7 @@ MainPanel::MainPanel (Concert7Processor& p)
     addAndMakeVisible (outMeter);
 
     // ---- tabs
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < kNumTabs; ++i)
     {
         auto& b = tabButtons[(size_t) i];
         b.setButtonText (kTabNames[i]);
@@ -128,6 +128,46 @@ MainPanel::MainPanel (Concert7Processor& p)
     addKnob (knobs, ext, ParamID::smooth, "SMOOTH");
     duckSidechain = std::make_unique<ParamToggle> (state, ParamID::duckSidechain, "SIDECHAIN");
     ext.addAndMakeVisible (*duckSidechain);
+
+    // direct page: the dry signal and the gap before the reverb
+    auto& dir = pages[kDirectTab];
+    addKnob (knobs, dir, ParamID::directHighs, "HIGHS", true);
+    addKnob (knobs, dir, ParamID::directAir, "AIR");
+    addKnob (knobs, dir, ParamID::directWidth, "WIDTH");
+    addKnob (knobs, dir, ParamID::directDelay, "DELAY");
+    addKnob (knobs, dir, ParamID::directGap, "REVERB GAP");
+
+    // space page: hall model and distance mode
+    auto& dst = pages[kSpaceTab];
+    addKnob (knobs, dst, ParamID::hallVolume, "VOLUME");
+    addKnob (knobs, dst, ParamID::hallAbsorption, "ABSORPTION");
+    addKnob (knobs, dst, ParamID::distance, "DISTANCE");
+    addKnob (knobs, dst, ParamID::distWidth, "SRC WIDTH");
+    addKnob (knobs, dst, ParamID::distMic, "MIC DIST");
+    hallOn = std::make_unique<ParamToggle> (state, ParamID::hallOn, "ON");
+    hallOn->setTooltip ("Sets the reverb by the size of the hall and how much it absorbs (stone, wood, audience ...): "
+                        "DECAY follows from both (Eyring) and is greyed out. While it is off, the greyed knobs show the "
+                        "hall that matches the current decay; switching it on starts exactly there. Works on a send too.");
+    distOn = std::make_unique<ParamToggle> (state, ParamID::distOn, "ON");
+    distAlign = std::make_unique<ParamToggle> (state, ParamID::distAlign, "TIME ALIGN");
+    distWidthOn = std::make_unique<ParamToggle> (state, ParamID::distWidthOn, "NARROW");
+    distOn->setTooltip ("Moves the dry signal nearer or further away in the hall. While it is off, the greyed DISTANCE "
+                        "shows where your current mix places the source; switching it on starts exactly there without "
+                        "changing the sound. MIX and the DIRECT controls (presence, air absorption, width, delay, reverb "
+                        "gap) then follow the distance and show the values in effect; switching it off keeps them. "
+                        "Use Concert7 as an insert on a dry source.");
+    distAlign->setTooltip ("Adds the travel time of the sound (distance minus MIC DIST) to DIRECT > DELAY, "
+                           "e.g. to align a spot microphone with the main pair");
+    distWidthOn->setTooltip ("Narrows the stereo image of the direct sound to the angle a source of SRC WIDTH covers "
+                             "at this distance, around the source's own panorama position");
+    for (Component* c : std::initializer_list<Component*> { hallOn.get(), distOn.get(), distAlign.get(), distWidthOn.get() })
+        dst.addAndMakeVisible (c);
+    dst.addAndMakeVisible (distanceView);
+    hallDecayLabel.setFont (labelFont (9.5f));
+    hallDecayLabel.setJustificationType (Justification::centred);
+    hallDecayLabel.setColour (Label::textColourId, Colours::textDim);
+    hallDecayLabel.setTooltip ("The decay the hall gives (DECAY is greyed out while the hall model is on)");
+    dst.addAndMakeVisible (hallDecayLabel);
 
     tabButtons[0].setToggleState (true, dontSendNotification);
     showTab (0);
@@ -273,14 +313,7 @@ void MainPanel::showSetupMenu()
                                 sh.setUIScale (chosen[r - 10]);
                                 if (onScaleChange) onScaleChange (chosen[r - 10]);
                             }
-                            else if (r == 5)
-                            {
-                                for (auto* prm : processor.getParameters())
-                                    if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
-                                        if (rp->paramID != ParamID::decay)
-                                            rp->setValueNotifyingHost (rp->getDefaultValue());
-                                processor.selectPreset (processor.getPresetId(), true);
-                            }
+                            else if (r == 5) processor.selectPreset (processor.getPresetId(), true);
                             else if (r == 6)
                             {
                                 AlertWindow::showMessageBoxAsync (
@@ -315,8 +348,8 @@ void MainPanel::showWelcome (bool show)
 
 void MainPanel::showTab (int index)
 {
-    currentTab = jlimit (0, 3, index);
-    for (int i = 0; i < 4; ++i)
+    currentTab = jlimit (0, kNumTabs - 1, index);
+    for (int i = 0; i < kNumTabs; ++i)
     {
         pages[(size_t) i].setVisible (i == currentTab);
         tabButtons[(size_t) i].setToggleState (i == currentTab, dontSendNotification);
@@ -363,14 +396,25 @@ void MainPanel::timerCallback()
             categoryButtons[i]->setToggleState (id.startsWith (categories[(int) i] + "/"), dontSendNotification);
     }
 
-    // double-click on DECAY returns to the native decay of the current preset
+    // double-click on DECAY returns to the native decay of the current preset (all other knobs: their default,
+    // DISTANCE: the start, where the sound is unchanged)
     if (status.nativeRT > 0.0f && status.nativeRT != lastNativeRT)
     {
         lastNativeRT = status.nativeRT;
-        if (auto* p = state.getParameter (ParamID::decay))
-            for (auto& k : knobs)
-                if (k->getParamID() == ParamID::decay)
-                    k->getSlider().setDoubleClickReturnValue (true, p->convertFrom0to1 (p->convertTo0to1 (jlimit (0.2f, 30.0f, status.nativeRT))));
+        // ... and on VOLUME / ABSORPTION to the hall that gives that decay
+        auto* p = state.getParameter (ParamID::decay);
+        const float native = p->convertFrom0to1 (p->convertTo0to1 (jlimit (0.2f, 30.0f, status.nativeRT)));
+        const auto absorption = state.getParameter (ParamID::hallAbsorption)->getNormalisableRange();
+        const float volume = estimateHallVolume (native);
+        for (auto& k : knobs)
+        {
+            if (k->getParamID() == ParamID::decay)
+                k->getSlider().setDoubleClickReturnValue (true, native);
+            else if (k->getParamID() == ParamID::hallVolume)
+                k->getSlider().setDoubleClickReturnValue (true, volume);
+            else if (k->getParamID() == ParamID::hallAbsorption)
+                k->getSlider().setDoubleClickReturnValue (true, jlimit (absorption.start, absorption.end, eyringAbsorption (volume, native)));
+        }
     }
 
     for (auto& k : knobs) k->repaint(); // values may change by automation
@@ -384,6 +428,72 @@ void MainPanel::timerCallback()
     }
     predelayNote->setEnabled (predelaySync->getToggleState());
     delayNote->setEnabled (delaySync->getToggleState());
+
+    // distance mode drives MIX and DIRECT (the greyed knobs show the values in effect);
+    // its own controls only work while it is on
+    const bool distance = processor.isDistanceOn();
+    const bool width = state.getRawParameterValue (ParamID::distWidthOn)->load() > 0.5f;
+    const bool align = state.getRawParameterValue (ParamID::distAlign)->load() > 0.5f;
+    const bool hall = processor.isHallOn();
+    const auto ds = processor.getDistanceState (false);
+    for (auto& k : knobs)
+    {
+        const auto& pid = k->getParamID();
+        const auto& d = ds.direct;
+        auto driven = [&] (float value, const String& text) {
+            k->setEnabled (! distance);
+            if (distance) k->setDisplayOverride (value, text);
+            else k->clearDisplayOverride();
+        };
+        if (pid == ParamID::mix)               driven (d.mix * 100.0f, String (roundToInt (d.mix * 100.0f)) + " %");
+        else if (pid == ParamID::directHighs)  driven (d.highsDb, formatDb (d.highsDb));
+        else if (pid == ParamID::directAir)    driven (d.airDb, d.airDb < 0.05f ? String ("Off") : "-" + String (d.airDb, 1) + " dB");
+        else if (pid == ParamID::directWidth)  driven (d.width * 100.0f, String (roundToInt (d.width * 100.0f)) + " %");
+        else if (pid == ParamID::directDelay)  driven (d.delayMs, formatMs (d.delayMs));
+        else if (pid == ParamID::directGap)    driven (d.gapMs, formatMs (d.gapMs));
+        if (pid == ParamID::decay)
+        {
+            // the hall model drives the decay
+            k->setEnabled (! hall);
+            const float decay = processor.getEffectiveDecay();
+            if (hall) k->setDisplayOverride (decay, formatSeconds (decay));
+            else k->clearDisplayOverride();
+        }
+        if (pid == ParamID::hallVolume || pid == ParamID::hallAbsorption)
+        {
+            // while off: the hall that matches the current decay
+            k->setEnabled (hall);
+            const float v = pid == ParamID::hallVolume ? processor.getHallVolume() : processor.getHallAbsorption();
+            if (hall) k->clearDisplayOverride();
+            else k->setDisplayOverride (v, pid == ParamID::hallVolume ? formatVolume (v) : formatAbsorption (v));
+        }
+        else if (k->getParentComponent() == &pages[kSpaceTab])
+            k->setEnabled (distance && (pid != ParamID::distWidth || width) && (pid != ParamID::distMic || align));
+        if (pid == ParamID::distance)
+        {
+            // double-click returns to the unchanged sound; while off, the knob shows where the mix sits
+            k->getSlider().setDoubleClickReturnValue (true, ds.model.referenceDistance);
+            if (distance)
+                k->clearDisplayOverride();
+            else
+            {
+                const auto range = state.getParameter (ParamID::distance)->getNormalisableRange();
+                const float r0 = ds.model.referenceDistance;
+                k->setDisplayOverride (r0, r0 >= range.end - 1.0e-3f ? "> " + formatMetres (range.end)
+                                         : r0 <= range.start + 1.0e-3f ? "< " + formatMetres (range.start)
+                                         : formatMetres (r0));
+            }
+        }
+    }
+    for (Component* c : std::initializer_list<Component*> { distAlign.get(), distWidthOn.get() })
+        c->setEnabled (distance);
+    if (currentTab == kSpaceTab) distanceView.repaint();
+
+    // the decay the hall gives (or, while the hall model is off, the decay the hall matches)
+    const auto decayText = "DECAY " + formatSeconds (processor.getEffectiveDecay());
+    if (hallDecayLabel.getText() != decayText)
+        hallDecayLabel.setText (decayText, dontSendNotification);
+    hallDecayLabel.setEnabled (hall);
 }
 
 //==============================================================================
@@ -479,6 +589,18 @@ void MainPanel::paint (Graphics& g)
         g.setFont (uiFont (11.0f));
         g.drawText ("-" + String (red, 1) + " dB", gr.reduced (6.0f), Justification::bottomLeft);
     }
+    else if (currentTab == kDirectTab)
+    {
+        auto& dir = pages[kDirectTab];
+        frame (dir, { 8, 8, 360, 180 }, "TONE");
+        frame (dir, { 376, 8, 200, 180 }, "IMAGE");
+        frame (dir, { 584, 8, 360, 180 }, "TIMING");
+    }
+    else if (currentTab == kSpaceTab)
+    {
+        frame (pages[kSpaceTab], { 8, 8, 208, 180 }, "HALL");
+        frame (pages[kSpaceTab], { 224, 8, 300, 180 }, "DISTANCE");
+    }
 }
 
 void MainPanel::resized()
@@ -518,7 +640,7 @@ void MainPanel::resized()
 
     // tabs
     const int tabY = mainArea.getBottom() + 10;
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < kNumTabs; ++i)
         tabButtons[(size_t) i].setBounds (12 + i * 128, tabY, 124, 28);
     setupButton.setBounds (kWidth - 12 - 110, tabY, 110, 28);
     pageArea = { 12, tabY + 32, kWidth - 24, kHeight - (tabY + 32) - 10 };
@@ -597,6 +719,31 @@ void MainPanel::resized()
     small (ext, ParamID::duckRelease, { 474, 34, 100, 130 });
     small (ext, ParamID::smooth, { 789, 34, 100, 130 });
     duckSidechain->setBounds (600, 160 - 8, 110, 24);
+
+    // direct page
+    auto& dir = pages[kDirectTab];
+    small (dir, ParamID::directHighs, { 68, 34, 100, 130 });
+    small (dir, ParamID::directAir, { 208, 34, 100, 130 });
+    small (dir, ParamID::directWidth, { 426, 34, 100, 130 });
+    small (dir, ParamID::directDelay, { 644, 34, 100, 130 });
+    small (dir, ParamID::directGap, { 784, 34, 100, 130 });
+
+    // space page: each section has its switch in the title row, one row of equal knobs and,
+    // below a knob, what belongs to it
+    auto& dst = pages[kSpaceTab];
+    const int switchY = 12, knobY = 40, knobW = 92, knobH = 112, belowY = 156;
+    hallOn->setBounds (8 + 208 - 104, switchY, 96, 22);
+    small (dst, ParamID::hallVolume, { 20, knobY, knobW, knobH });
+    small (dst, ParamID::hallAbsorption, { 20 + knobW, knobY, knobW, knobH });
+    hallDecayLabel.setBounds (20, belowY, 2 * knobW, 22);
+
+    distOn->setBounds (224 + 300 - 104, switchY, 96, 22);
+    small (dst, ParamID::distance, { 236, knobY, knobW, knobH });
+    small (dst, ParamID::distWidth, { 236 + knobW, knobY, knobW, knobH });
+    small (dst, ParamID::distMic, { 236 + 2 * knobW, knobY, knobW, knobH });
+    distWidthOn->setBounds (236 + knobW + 6, belowY, knobW - 12, 22);
+    distAlign->setBounds (236 + 2 * knobW + 6, belowY, knobW - 12, 22);
+    distanceView.setBounds (532, 8, dst.getWidth() - 540, 180);
 
     if (welcome != nullptr)
         welcome->setBounds (getLocalBounds());

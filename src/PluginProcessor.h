@@ -5,11 +5,13 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <mutex>
+#include <array>
 #include <atomic>
 #include <memory>
 #include "Parameters.h"
 #include "SharedState.h"
 #include "dsp/ConvolutionEngine.h"
+#include "dsp/Distance.h"
 #include "dsp/IRDesigner.h"
 #include "dsp/PostProcessing.h"
 
@@ -54,7 +56,8 @@ public:
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
     SharedState& getShared() { return *shared; }
 
-    /** Selects a library preset. userAction = true resets decay to the preset's native time. */
+    /** Selects a library preset. userAction = true (also when the current preset is chosen again)
+        resets all parameters to their defaults and decay to the preset's native time. */
     void selectPreset (const juce::String& presetId, bool userAction);
     void selectPresetByOffset (int delta);
     juce::String getPresetId() const;
@@ -85,6 +88,32 @@ public:
     float getEffectivePredelayMs() const;
     float getEffectiveDelayMs() const;
 
+    /** Hall model: volume and absorption drive the decay (Eyring). Switching it on keeps the decay.
+        While it is off, the volume is estimated from the decay and the absorption follows from both. */
+    bool isHallOn() const { return param (ParamID::hallOn) > 0.5f; }
+    float getEffectiveDecay() const;
+    float getHallVolume() const;
+    float getHallAbsorption() const;
+
+    /** Distance mode. Switching it on keeps the sound: the current mix becomes the reference distance.
+        While it is on, MIX and the DIRECT settings follow the distance (relative to their values);
+        switching it off hands the values in effect back to them. While it is off, the model sits at
+        the reference (the distance the current mix corresponds to). */
+    bool isDistanceOn() const { return param (ParamID::distOn) > 0.5f; }
+    DistanceModel getDistanceModel() const { return makeDistanceModel (isDistanceOn()); }
+
+    struct DistanceState
+    {
+        DistanceModel model;
+        DistanceResult result;
+        DirectSettings direct;                 // in effect: MIX and DIRECT, moved by the distance when on
+        float drrDb = 0.0f;                    // resulting direct to reverberant ratio (mid band)
+        float criticalDistance = 0.0f;         // where that ratio crosses 0 dB
+        float firstReflectionMs = 0.0f;        // gap between direct sound and first reflection
+    };
+    /** withReadouts = false skips the values only the user interface needs. */
+    DistanceState getDistanceState (bool withReadouts = true) const { return makeDistanceState (isDistanceOn(), withReadouts); }
+
 private:
     class Builder;
     friend class Builder;
@@ -93,6 +122,7 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void handleAsyncUpdate() override;
     void requestRebuild();
+    void resetParameters();
     void buildNow();
     DesignParams readDesignParams() const;
     EQSettings readEQSettings() const;
@@ -105,8 +135,21 @@ private:
     PostEQ eq;
     Modulator modulator;
     Ducker ducker;
+    DistanceRenderer distanceRenderer;
     juce::AudioBuffer<float> wet, dry;
-    juce::SmoothedValue<float> mixSmooth, gainSmooth;
+    juce::SmoothedValue<float> dryGainSmooth, wetGainSmooth, gainSmooth;
+    std::atomic<float> irMidEnergy { 0.0f }, irMidEnergyDiagonal { 0.0f }, irOnsetMs { 0.0f };  // of the last built IR
+    std::atomic<float> distanceReference { 8.0f };   // m, stored with the project
+    std::atomic<float> pendingDistance { -1.0f };    // reference to be written to the distance parameter
+    std::atomic<float> pendingHallVolume { -1.0f }, pendingHallAbsorption { -1.0f };  // written when the hall is switched on
+    std::atomic<float> pendingDecay { -1.0f };       // the hall's decay, written to DECAY when the hall is switched off
+    std::atomic<bool> restoringState { false };
+    float computeReferenceDistance (float rt60, float volume) const;
+    DistanceModel makeDistanceModel (bool distanceOn) const;
+    DistanceState makeDistanceState (bool distanceOn, bool withReadouts) const;
+    DirectSettings readDirectSettings() const;   // MIX and DIRECT (or the values being handed back)
+    std::array<std::atomic<float>, 6> pendingDirect {};  // values handed back when distance is switched off
+    std::atomic<bool> handbackPending { false };
 
     std::atomic<double> currentSampleRate { 0.0 };
     std::atomic<int> currentBlockSize { 0 };

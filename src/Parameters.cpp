@@ -2,6 +2,7 @@
 // Copyright (C) 2026 pschopen, GPL-3.0-or-later
 
 #include "Parameters.h"
+#include "dsp/Distance.h"
 
 namespace concert7
 {
@@ -38,6 +39,24 @@ String formatDb (float db, float offBelowOrAt)
     if (db <= offBelowOrAt + 0.01f)
         return "Off";
     return (db > 0.05f ? "+" : "") + String (db, 1) + " dB";
+}
+
+String formatMetres (float m)
+{
+    return String (m, m < 10.0f ? 1 : 0) + " m";
+}
+
+String formatAbsorption (float a)
+{
+    return String (a, 2) + " " + describeAbsorption (a);
+}
+
+String formatVolume (float v)
+{
+    const int rounded = v >= 1000.0f ? roundToInt (v / 100.0f) * 100 : roundToInt (v / 10.0f) * 10;
+    const auto digits = rounded >= 1000 ? String (rounded / 1000) + " " + String (rounded % 1000).paddedLeft ('0', 3)
+                                        : String (rounded);
+    return digits + " " + String (CharPointer_UTF8 ("m\xc2\xb3"));
 }
 
 namespace
@@ -149,6 +168,29 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::eqLpOn, 1 }, "EQ LP On", false));
     layout.add (floatParam (ParamID::eqLpFreq, "EQ LP Freq", logRange (1000.0f, 22000.0f), 12000.0f, "Hz", hz));
 
+    // ---- direct sound
+    layout.add (floatParam (ParamID::directHighs, "Direct Highs", NormalisableRange<float> (DirectSettings::kHighsMinDb, DirectSettings::kHighsMaxDb),
+                            0.0f, "dB", db));
+    layout.add (floatParam (ParamID::directAir, "Direct Air", NormalisableRange<float> (0.0f, DirectSettings::kAirMaxDb), 0.0f, "dB",
+                            [] (float v, int) { return v < 0.05f ? String ("Off") : "-" + String (v, 1) + " dB"; }));
+    layout.add (floatParam (ParamID::directWidth, "Direct Width", NormalisableRange<float> (0.0f, 100.0f), 100.0f, "%", pct));
+    layout.add (floatParam (ParamID::directDelay, "Direct Delay", skewedRange (0.0f, DirectSettings::kDelayMaxMs, 30.0f), 0.0f, "ms", ms));
+    layout.add (floatParam (ParamID::directGap, "Reverb Gap", skewedRange (0.0f, DirectSettings::kGapMaxMs, 20.0f), 0.0f, "ms", ms));
+
+    // ---- space: hall model and distance mode
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::hallOn, 1 }, "Hall On", false));
+    layout.add (floatParam (ParamID::hallVolume, "Hall Volume", logRange (150.0f, 50000.0f), 16000.0f, "m3",
+                            [] (float v, int) { return formatVolume (v); }));
+    layout.add (floatParam (ParamID::hallAbsorption, "Hall Absorption", skewedRange (0.03f, 0.9f, 0.27f), 0.27f, "",
+                            [] (float v, int) { return formatAbsorption (v); }));
+    auto metres = [] (float v, int) { return formatMetres (v); };
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::distOn, 1 }, "Distance On", false));
+    layout.add (floatParam (ParamID::distance, "Distance", logRange (0.5f, 60.0f), 8.0f, "m", metres));
+    layout.add (floatParam (ParamID::distMic, "Mic Distance", logRange (0.1f, 10.0f), 1.0f, "m", metres));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::distWidthOn, 1 }, "Source Width On", false));
+    layout.add (floatParam (ParamID::distWidth, "Source Width", logRange (0.2f, 40.0f), 2.0f, "m", metres));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::distAlign, 1 }, "Time Align", false));
+
     return layout;
 }
 
@@ -159,7 +201,7 @@ bool isIRParameter (const String& id)
         ParamID::early, ParamID::late, ParamID::vlf, ParamID::erRolloff, ParamID::lateRolloff,
         ParamID::erPattern, ParamID::delayTime, ParamID::delaySync, ParamID::delayNote,
         ParamID::delayLevel, ParamID::lowFreq, ParamID::lowMult, ParamID::highFreq, ParamID::highMult,
-        ParamID::smooth
+        ParamID::smooth, ParamID::hallOn, ParamID::hallVolume, ParamID::hallAbsorption
     };
     return irParams.contains (id);
 }

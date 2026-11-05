@@ -45,6 +45,18 @@ private:
     std::shared_ptr<const BuiltIR> ir;
 };
 
+/** Distance mode: top view of the hall with source, listener, critical distance and the
+    path of the first reflection, plus the values of the distance model. */
+class DistanceView : public juce::Component
+{
+public:
+    explicit DistanceView (Concert7Processor& p) : processor (p) {}
+    void paint (juce::Graphics&) override;
+
+private:
+    Concert7Processor& processor;
+};
+
 /** Interactive response curve of the post EQ. Nodes can be dragged; the wheel changes Q. */
 class EQView : public juce::Component, private juce::Timer
 {

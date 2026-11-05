@@ -102,11 +102,14 @@ void Concert7Processor::prepareToPlay (double sampleRate, int samplesPerBlock)
         eq.prepare (sampleRate);
         modulator.prepare (sampleRate);
         ducker.prepare (sampleRate);
+        distanceRenderer.prepare (sampleRate, block);
         wet.setSize (2, block);
         dry.setSize (4, block); // 0/1 dry input, 2/3 convolver input
-        mixSmooth.reset (sampleRate, 0.03);
+        dryGainSmooth.reset (sampleRate, 0.03);
+        wetGainSmooth.reset (sampleRate, 0.03);
         gainSmooth.reset (sampleRate, 0.03);
-        mixSmooth.setCurrentAndTargetValue (param (ParamID::mix) * 0.01f);
+        dryGainSmooth.setCurrentAndTargetValue (1.0f - param (ParamID::mix) * 0.01f);
+        wetGainSmooth.setCurrentAndTargetValue (param (ParamID::mix) * 0.01f);
         gainSmooth.setCurrentAndTargetValue (Decibels::decibelsToGain (param (ParamID::gain)));
         lastBuiltRate = 0.0;
         prepared = true;
@@ -122,9 +125,11 @@ void Concert7Processor::releaseResources() {}
 
 double Concert7Processor::getTailLengthSeconds() const
 {
+    const auto direct = getDistanceState (false).direct;
+    const double extra = 0.001 * (direct.delayMs + direct.gapMs);
     if (auto ir = engine.getActiveIR())
-        return ir->length() / std::max (1.0, ir->sampleRate);
-    return 2.0;
+        return ir->length() / std::max (1.0, ir->sampleRate) + extra;
+    return 2.0 + extra;
 }
 
 //==============================================================================
@@ -229,17 +234,25 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
     wetMeter.push (wetL, n);
     wetMeter.push (wetR, n);
 
+    // direct sound (tone, air, width, delay) and the reverb gap; in distance mode they follow the distance
+    const auto direct = getDistanceState (false).direct;
+    distanceRenderer.process (dryL, dryR, wetL, wetR, n, direct);
+    const float dryTarget = 1.0f - direct.mix;
+    const float wetTarget = direct.mix;
+
     // mix + output gain
-    mixSmooth.setTargetValue (param (ParamID::mix) * 0.01f);
+    dryGainSmooth.setTargetValue (dryTarget);
+    wetGainSmooth.setTargetValue (wetTarget);
     gainSmooth.setTargetValue (Decibels::decibelsToGain (param (ParamID::gain)));
     float* outL = mainOut.getWritePointer (0);
     float* outR = mainOut.getWritePointer (1);
     for (int i = 0; i < n; ++i)
     {
-        const float m = mixSmooth.getNextValue();
+        const float a = dryGainSmooth.getNextValue();
+        const float b = wetGainSmooth.getNextValue();
         const float g = gainSmooth.getNextValue();
-        outL[i] = (dryL[i] * (1.0f - m) + wetL[i] * m) * g;
-        outR[i] = (dryR[i] * (1.0f - m) + wetR[i] * m) * g;
+        outL[i] = (dryL[i] * a + wetL[i] * b) * g;
+        outR[i] = (dryR[i] * a + wetR[i] * b) * g;
     }
     outMeterL.push (outL, n);
     outMeterR.push (outR, n);
@@ -269,10 +282,116 @@ float Concert7Processor::getEffectiveDelayMs() const
     return param (ParamID::delayTime);
 }
 
+float Concert7Processor::getHallVolume() const
+{
+    if (! isHallOn()) return estimateHallVolume (getEffectiveDecay());
+    const float pending = pendingHallVolume.load();
+    return pending > 0.0f ? pending : param (ParamID::hallVolume);
+}
+
+float Concert7Processor::getHallAbsorption() const
+{
+    if (! isHallOn()) return eyringAbsorption (getHallVolume(), getEffectiveDecay());
+    const float pending = pendingHallAbsorption.load();
+    return pending > 0.0f ? pending : param (ParamID::hallAbsorption);
+}
+
+float Concert7Processor::getEffectiveDecay() const
+{
+    if (! isHallOn())
+    {
+        const float pending = pendingDecay.load();
+        return pending > 0.0f ? pending : param (ParamID::decay);
+    }
+    const auto range = apvts.getParameter (ParamID::decay)->getNormalisableRange();
+    return jlimit (range.start, range.end, eyringRt60 (getHallVolume(), getHallAbsorption()));
+}
+
+DistanceModel Concert7Processor::makeDistanceModel (bool distanceOn) const
+{
+    DistanceModel m;
+    m.rt60 = getEffectiveDecay();
+    m.volume = getHallVolume();
+    m.micDistance = param (ParamID::distMic);
+    m.sourceWidth = param (ParamID::distWidthOn) > 0.5f ? param (ParamID::distWidth) : 0.0f;
+    m.timeAlign = param (ParamID::distAlign) > 0.5f;
+    if (distanceOn)
+    {
+        const float pending = pendingDistance.load();
+        m.distance = pending > 0.0f ? pending : param (ParamID::distance);
+        m.referenceDistance = distanceReference.load();
+    }
+    else
+    {
+        m.distance = m.referenceDistance = computeReferenceDistance (m.rt60, m.volume);
+    }
+    return m;
+}
+
+DirectSettings Concert7Processor::readDirectSettings() const
+{
+    DirectSettings d;
+    if (handbackPending.load())
+    {
+        d.mix = pendingDirect[0]; d.highsDb = pendingDirect[1]; d.airDb = pendingDirect[2];
+        d.width = pendingDirect[3]; d.delayMs = pendingDirect[4]; d.gapMs = pendingDirect[5];
+        return d;
+    }
+    d.mix = param (ParamID::mix) * 0.01f;
+    d.highsDb = param (ParamID::directHighs);
+    d.airDb = param (ParamID::directAir);
+    d.width = param (ParamID::directWidth) * 0.01f;
+    d.delayMs = param (ParamID::directDelay);
+    d.gapMs = param (ParamID::directGap);
+    return d;
+}
+
+Concert7Processor::DistanceState Concert7Processor::makeDistanceState (bool distanceOn, bool withReadouts) const
+{
+    DistanceState ds;
+    ds.model = makeDistanceModel (distanceOn);
+    ds.result = computeDistance (ds.model);
+    ds.direct = readDirectSettings();
+    if (distanceOn)
+        ds.direct = applyDistance (ds.direct, ds.result);
+    if (! withReadouts) return ds;
+
+    ds.firstReflectionMs = irOnsetMs.load() + ds.direct.gapMs;
+    const auto crossfeed = (Crossfeed) roundToInt (param (ParamID::crossfeed));
+    const float energy = crossfeed == Crossfeed::NoCrossfeed ? irMidEnergyDiagonal.load() : irMidEnergy.load();
+    const float mix = ds.direct.mix;
+    ds.criticalDistance = ds.result.criticalDistance;
+    if (mix >= 1.0f)
+        ds.drrDb = -99.0f;
+    else if (mix <= 0.0f || energy <= 1.0e-9f)
+        ds.drrDb = 99.0f;
+    else
+    {
+        ds.drrDb = Decibels::gainToDecibels ((1.0f - mix) / mix) - 10.0f * std::log10 (energy);
+        // the ratio follows the model's slope, offset by the preset's own balance
+        const float offset = ds.drrDb - barronDrrDb (ds.model.distance, ds.model.rt60, ds.result.volume);
+        ds.criticalDistance = distanceForDrr (-offset, ds.model.rt60, ds.result.volume);
+    }
+    return ds;
+}
+
+float Concert7Processor::computeReferenceDistance (float rt60, float volume) const
+{
+    // the distance at which the model gives the direct to reverberant ratio of the current mix
+    const float mix = param (ParamID::mix) * 0.01f;
+    const auto range = apvts.getParameter (ParamID::distance)->getNormalisableRange();
+    if (mix <= 0.001f) return range.start;
+    if (mix >= 0.999f) return range.end;
+    const auto crossfeed = (Crossfeed) roundToInt (param (ParamID::crossfeed));
+    const float energy = std::max (1.0e-9f, crossfeed == Crossfeed::NoCrossfeed ? irMidEnergyDiagonal.load() : irMidEnergy.load());
+    const float drr = Decibels::gainToDecibels ((1.0f - mix) / mix) - 10.0f * std::log10 (energy);
+    return jlimit (range.start, range.end, distanceForDrr (drr, rt60, volume));
+}
+
 DesignParams Concert7Processor::readDesignParams() const
 {
     DesignParams d;
-    d.decay = param (ParamID::decay);
+    d.decay = getEffectiveDecay();
     d.predelayMs = getEffectivePredelayMs();
     d.earlyDb = param (ParamID::early);
     d.lateDb = param (ParamID::late);
@@ -400,7 +519,9 @@ void Concert7Processor::buildNow()
 
     // ---- parameters
     auto dp = readDesignParams();
-    if (userPresetChange.exchange (false) && ! shared->getHoldDecay())
+    // a newly selected preset starts at its own decay time (the hall model keeps its own)
+    const bool presetChanged = userPresetChange.exchange (false);
+    if (presetChanged && ! shared->getHoldDecay() && ! isHallOn())
     {
         // a newly selected preset starts at its own decay time
         auto* decayParam = apvts.getParameter (ParamID::decay);
@@ -420,6 +541,9 @@ void Concert7Processor::buildNow()
     if (! engine.loadIR (built, [this] { return abortBuild.load() || builder->threadShouldExit(); }))
         return;
 
+    irMidEnergy = built->midEnergy;
+    irMidEnergyDiagonal = built->midEnergyDiagonal;
+    irOnsetMs = built->onsetMs;
     lastBuiltParams = dp;
     lastBuiltPreset = id;
     lastBuiltPattern = patternId;
@@ -456,11 +580,86 @@ void Concert7Processor::handleAsyncUpdate()
     if (pending > 0.0f)
         if (auto* p = apvts.getParameter (ParamID::decay))
             p->setValueNotifyingHost (p->convertTo0to1 (pending));
+
+    // distance mode was switched on: the distance knob starts at the reference
+    float distance = pendingDistance.load();
+    if (distance > 0.0f)
+    {
+        if (auto* p = apvts.getParameter (ParamID::distance))
+            p->setValueNotifyingHost (p->convertTo0to1 (distance));
+        pendingDistance.compare_exchange_strong (distance, -1.0f);
+    }
+    // distance was switched off: MIX and DIRECT take the values in effect
+    if (handbackPending.load())
+    {
+        const std::pair<const char*, float> values[] = {
+            { ParamID::mix, pendingDirect[0] * 100.0f }, { ParamID::directHighs, pendingDirect[1].load() },
+            { ParamID::directAir, pendingDirect[2].load() }, { ParamID::directWidth, pendingDirect[3] * 100.0f },
+            { ParamID::directDelay, pendingDirect[4].load() }, { ParamID::directGap, pendingDirect[5].load() } };
+        for (auto [id, v] : values)
+            if (auto* p = apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (v));
+        handbackPending = false;
+    }
+
+    // the hall model was switched off: DECAY keeps the decay the hall gave
+    float decay = pendingDecay.load();
+    if (decay > 0.0f)
+    {
+        if (auto* p = apvts.getParameter (ParamID::decay))
+            p->setValueNotifyingHost (p->convertTo0to1 (decay));
+        pendingDecay.compare_exchange_strong (decay, -1.0f);
+    }
+
+    // the hall model was switched on: volume and absorption start where they give the current decay
+    float volume = pendingHallVolume.load(), absorption = pendingHallAbsorption.load();
+    if (volume > 0.0f && absorption > 0.0f)
+    {
+        apvts.getParameter (ParamID::hallVolume)->setValueNotifyingHost (apvts.getParameter (ParamID::hallVolume)->convertTo0to1 (volume));
+        apvts.getParameter (ParamID::hallAbsorption)->setValueNotifyingHost (apvts.getParameter (ParamID::hallAbsorption)->convertTo0to1 (absorption));
+        pendingHallVolume.compare_exchange_strong (volume, -1.0f);
+        pendingHallAbsorption.compare_exchange_strong (absorption, -1.0f);
+    }
     sendChangeMessage();
 }
 
-void Concert7Processor::parameterChanged (const String& id, float)
+void Concert7Processor::parameterChanged (const String& id, float value)
 {
+    if (id == ParamID::distOn && value > 0.5f && ! restoringState.load())
+    {
+        // start from the unchanged sound: the current mix defines where the source is
+        const auto model = getDistanceModel();
+        const float reference = computeReferenceDistance (model.rt60, model.volume);
+        distanceReference = reference;
+        pendingDistance = reference;
+        triggerAsyncUpdate();
+    }
+    else if (id == ParamID::distOn && value < 0.5f && ! restoringState.load())
+    {
+        // hand the values in effect back to MIX and DIRECT: nothing jumps
+        const auto d = makeDistanceState (true, false).direct;
+        const float values[] = { d.mix, d.highsDb, d.airDb, d.width, d.delayMs, d.gapMs };
+        for (size_t i = 0; i < pendingDirect.size(); ++i)
+            pendingDirect[i] = values[i];
+        handbackPending = true;
+        triggerAsyncUpdate();
+    }
+    if (id == ParamID::hallOn && value > 0.5f && ! restoringState.load())
+    {
+        // keep the decay: the estimated volume and the absorption that gives the current decay
+        const float decay = param (ParamID::decay);
+        const auto absorptionRange = apvts.getParameter (ParamID::hallAbsorption)->getNormalisableRange();
+        const float volume = estimateHallVolume (decay);
+        pendingHallAbsorption = jlimit (absorptionRange.start, absorptionRange.end, eyringAbsorption (volume, decay));
+        pendingHallVolume = volume;
+        triggerAsyncUpdate();
+    }
+    else if (id == ParamID::hallOn && value < 0.5f && ! restoringState.load())
+    {
+        const auto range = apvts.getParameter (ParamID::decay)->getNormalisableRange();
+        pendingDecay = jlimit (range.start, range.end, eyringRt60 (param (ParamID::hallVolume), param (ParamID::hallAbsorption)));
+        triggerAsyncUpdate();
+    }
     if (isIRParameter (id))
         requestRebuild();
 }
@@ -469,11 +668,14 @@ void Concert7Processor::changeListenerCallback (ChangeBroadcaster*)
 {
     // the library was rescanned: reload the current preset (files may have moved).
     // Never lock buildMutex here: the builder may be waiting for the audio thread.
+    // A missing preset falls back to the first one at its native decay; the other settings stay.
     sourcesInvalid = true;
     if (shared->indexOfPreset (getPresetId()) < 0)
-        selectPreset (shared->getDefaultPresetId(), true);
-    else
-        requestRebuild();
+    {
+        { const ScopedLock sl (statusLock); presetId = shared->getDefaultPresetId(); }
+        userPresetChange = true;
+    }
+    requestRebuild();
     sendChangeMessage();
 }
 
@@ -484,9 +686,35 @@ void Concert7Processor::selectPreset (const String& id, bool userAction)
         const ScopedLock sl (statusLock);
         presetId = id;
     }
-    if (userAction) userPresetChange = true;
+    if (userAction)
+    {
+        resetParameters();
+        userPresetChange = true;
+    }
     requestRebuild();
     sendChangeMessage();
+}
+
+void Concert7Processor::resetParameters()
+{
+    // every control returns to its default; DECAY follows the preset in the next build
+    // (or keeps the decay in effect, the hall's included, when it is held)
+    if (shared->getHoldDecay() && isHallOn())
+        if (auto* p = apvts.getParameter (ParamID::decay))
+            p->setValueNotifyingHost (p->convertTo0to1 (getEffectiveDecay()));
+
+    // nothing switched on or off here may hand values over afterwards
+    pendingDistance = -1.0f;
+    pendingHallVolume = -1.0f;
+    pendingHallAbsorption = -1.0f;
+    pendingDecay = -1.0f;
+    handbackPending = false;
+    restoringState = true;
+    for (auto* prm : getParameters())
+        if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
+            if (rp->paramID != ParamID::decay)
+                rp->setValueNotifyingHost (rp->getDefaultValue());
+    restoringState = false;
 }
 
 void Concert7Processor::selectPresetByOffset (int delta)
@@ -545,6 +773,7 @@ void Concert7Processor::getStateInformation (MemoryBlock& destData)
     auto state = apvts.copyState();
     state.setProperty ("presetId", getPresetId(), nullptr);
     state.setProperty ("version", CONCERT7_VERSION, nullptr);
+    state.setProperty ("distanceReference", distanceReference.load(), nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
@@ -556,7 +785,15 @@ void Concert7Processor::setStateInformation (const void* data, int sizeInBytes)
         if (! xml->hasTagName (apvts.state.getType())) return;
         auto tree = ValueTree::fromXml (*xml);
         const auto id = tree.getProperty ("presetId").toString();
+        distanceReference = (float) tree.getProperty ("distanceReference", 8.0);
+        pendingDistance = -1.0f;
+        pendingHallVolume = -1.0f;
+        pendingHallAbsorption = -1.0f;
+        pendingDecay = -1.0f;
+        handbackPending = false;
+        restoringState = true;
         apvts.replaceState (tree);
+        restoringState = false;
         {
             const ScopedLock sl (statusLock);
             presetId = id.isNotEmpty() ? id : shared->getDefaultPresetId();

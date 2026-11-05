@@ -96,6 +96,11 @@ struct BuiltIR
     std::vector<float> envelopeDb;       // energy envelope of the result, 0 dB = max
     std::vector<float> nativeEnvelopeDb; // same time axis, unmodified source
     std::vector<float> rtFreqs, rtNative, rtTarget;
+
+    // distance mode: energy relative to a unit impulse, 500 Hz - 2 kHz, per output channel
+    float midEnergy = 0.0f;          // all four paths
+    float midEnergyDiagonal = 0.0f;  // L->L and R->R only (no crossfeed)
+    float onsetMs = 0.0f;            // first reflection of the preset (for the distance display)
 };
 
 /** Loads the files of a preset into a SourceIR at the given host rate. */
