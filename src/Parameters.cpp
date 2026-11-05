@@ -119,10 +119,12 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (floatParam (ParamID::highFreq, "High Freq", logRange (200.0f, 16000.0f), 4000.0f, "Hz", hz));
     layout.add (floatParam (ParamID::highMult, "High Mult", logRange (0.2f, 4.0f), 1.0f, "x", mult));
 
-    // ---- modulation + ducker
+    // ---- extras: modulation, smooth, ducker
     layout.add (floatParam (ParamID::modDepth, "Mod Depth", NormalisableRange<float> (0.0f, 100.0f), 0.0f, "%", pct));
     layout.add (floatParam (ParamID::modRate, "Mod Rate", logRange (0.05f, 4.0f), 0.5f, "Hz",
                             [] (float v, int) { return String (v, 2) + " Hz"; }));
+    layout.add (floatParam (ParamID::smooth, "Smooth", NormalisableRange<float> (0.0f, 100.0f), 0.0f, "%",
+                            [] (float v, int) { return v < 0.5f ? String ("Off") : String (roundToInt (v)) + " %"; }));
     layout.add (floatParam (ParamID::duckAmount, "Duck Amount", NormalisableRange<float> (0.0f, 40.0f), 0.0f, "dB",
                             [] (float v, int) { return v < 0.05f ? String ("Off") : "-" + String (v, 1) + " dB"; }));
     layout.add (floatParam (ParamID::duckThreshold, "Duck Threshold", NormalisableRange<float> (-60.0f, 0.0f), -30.0f, "dB", db));
@@ -156,7 +158,8 @@ bool isIRParameter (const String& id)
         ParamID::predelay, ParamID::predelaySync, ParamID::predelayNote, ParamID::decay,
         ParamID::early, ParamID::late, ParamID::vlf, ParamID::erRolloff, ParamID::lateRolloff,
         ParamID::erPattern, ParamID::delayTime, ParamID::delaySync, ParamID::delayNote,
-        ParamID::delayLevel, ParamID::lowFreq, ParamID::lowMult, ParamID::highFreq, ParamID::highMult
+        ParamID::delayLevel, ParamID::lowFreq, ParamID::lowMult, ParamID::highFreq, ParamID::highMult,
+        ParamID::smooth
     };
     return irParams.contains (id);
 }

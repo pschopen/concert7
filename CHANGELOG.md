@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- New Smooth control (0 – 100 %): evens out resonances, ringing and bumps in the decay of the late reverb.
+  Like Decay it rebuilds the impulse response, so the change fades in after a moment. At 0 % (default)
+  the reverb sounds exactly as before
+- The MOD / DUCK tab is now called EXTRAS and holds Modulation, Ducker and Smooth
+
 ## 0.1.1-beta
 
 - Samplicity now lists the Bricasti M7 library at the bottom of its downloads page

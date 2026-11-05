@@ -138,6 +138,7 @@ public:
             setParam (proc, ParamID::highMult, 0.2f);
             setParam (proc, ParamID::delayLevel, 0.0f);
             setParam (proc, ParamID::modDepth, 100.0f);
+            setParam (proc, ParamID::smooth, 100.0f);
             setParam (proc, ParamID::duckAmount, 20.0f);
             setParam (proc, ParamID::eqHighGain, 18.0f);
             settle (proc);

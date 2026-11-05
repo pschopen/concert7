@@ -285,6 +285,7 @@ DesignParams Concert7Processor::readDesignParams() const
     d.lowMult = param (ParamID::lowMult);
     d.highFreq = param (ParamID::highFreq);
     d.highMult = param (ParamID::highMult);
+    d.smooth = param (ParamID::smooth) * 0.01f;
     return d;
 }
 

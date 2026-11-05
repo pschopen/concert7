@@ -10,7 +10,7 @@ using namespace juce;
 namespace
 {
     constexpr int kFaceHeight = 172;
-    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "MOD / DUCK" };
+    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS" };
 }
 
 //==============================================================================
@@ -118,15 +118,16 @@ MainPanel::MainPanel (Concert7Processor& p)
     for (Component* c : std::initializer_list<Component*> { eqOn.get(), eqHpOn.get(), eqLpOn.get(), eqLowType.get(), eqHighType.get() })
         eqp.addAndMakeVisible (c);
 
-    // mod / duck page
-    auto& mod = pages[3];
-    addKnob (knobs, mod, ParamID::modDepth, "DEPTH");
-    addKnob (knobs, mod, ParamID::modRate, "RATE");
-    addKnob (knobs, mod, ParamID::duckAmount, "AMOUNT");
-    addKnob (knobs, mod, ParamID::duckThreshold, "THRESHOLD");
-    addKnob (knobs, mod, ParamID::duckRelease, "RELEASE");
+    // extras page
+    auto& ext = pages[3];
+    addKnob (knobs, ext, ParamID::modDepth, "DEPTH");
+    addKnob (knobs, ext, ParamID::modRate, "RATE");
+    addKnob (knobs, ext, ParamID::duckAmount, "AMOUNT");
+    addKnob (knobs, ext, ParamID::duckThreshold, "THRESHOLD");
+    addKnob (knobs, ext, ParamID::duckRelease, "RELEASE");
+    addKnob (knobs, ext, ParamID::smooth, "SMOOTH");
     duckSidechain = std::make_unique<ParamToggle> (state, ParamID::duckSidechain, "SIDECHAIN");
-    mod.addAndMakeVisible (*duckSidechain);
+    ext.addAndMakeVisible (*duckSidechain);
 
     tabButtons[0].setToggleState (true, dontSendNotification);
     showTab (0);
@@ -453,6 +454,7 @@ void MainPanel::paint (Graphics& g)
     {
         frame (pages[3], { 8, 8, 240, 180 }, "MODULATION");
         frame (pages[3], { 256, 8, 470, 180 }, "DUCKER");
+        frame (pages[3], { 734, 8, 210, 180 }, "SMOOTH");
         // gain reduction readout
         auto gr = Rectangle<float> (600.0f, 50.0f, 110.0f, 100.0f).translated ((float) pages[3].getX(), (float) pages[3].getY());
         g.setColour (Colours::lcdBack);
@@ -576,13 +578,14 @@ void MainPanel::resized()
             k->resized();
         }
 
-    // mod / duck page
-    auto& mod = pages[3];
-    small (mod, ParamID::modDepth, { 24, 34, 100, 130 });
-    small (mod, ParamID::modRate, { 132, 34, 100, 130 });
-    small (mod, ParamID::duckAmount, { 270, 34, 100, 130 });
-    small (mod, ParamID::duckThreshold, { 372, 34, 100, 130 });
-    small (mod, ParamID::duckRelease, { 474, 34, 100, 130 });
+    // extras page
+    auto& ext = pages[3];
+    small (ext, ParamID::modDepth, { 24, 34, 100, 130 });
+    small (ext, ParamID::modRate, { 132, 34, 100, 130 });
+    small (ext, ParamID::duckAmount, { 270, 34, 100, 130 });
+    small (ext, ParamID::duckThreshold, { 372, 34, 100, 130 });
+    small (ext, ParamID::duckRelease, { 474, 34, 100, 130 });
+    small (ext, ParamID::smooth, { 789, 34, 100, 130 });
     duckSidechain->setBounds (600, 160 - 8, 110, 24);
 
     if (welcome != nullptr)

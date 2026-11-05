@@ -79,10 +79,11 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Multi-band decay | low shelf 80 Hz – 4.8 kHz and high shelf 200 Hz – 16 kHz, ×0.2 – ×4 |
 | Early patterns | 32 patterns taken from the early part of other presets, ordered short → long |
 | Delay | 100 ms – 1 s or tempo synced, level –20…0 dB / off, 3 voices of the late reverb |
-| Ducker | amount, threshold, release, sidechain input |
+| Ducker | amount, threshold, release, sidechain input (EXTRAS tab) |
 | Post EQ | high pass 12 dB, low shelf/bell, mid bell, high shelf/bell, high cut 12 dB, interactive curve |
 | Propagation | True Stereo, No Crossfeed (L→L / R→R), Mono In |
-| Modulation | depth / rate vibrato on the wet signal |
+| Modulation | depth / rate vibrato on the wet signal (EXTRAS tab) |
+| Smooth | 0 – 100 %, evens out resonances, ringing and bumps in the decay of the late reverb (EXTRAS tab) |
 | Interface | scalable UI (75 – 200 %), meters, dot matrix display with decay envelope, English / German setup screen |
 | Latency | zero (non-uniform partitioned convolution, tail on a background thread) |
 
@@ -106,7 +107,9 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    (Decay × low/high multipliers). The gain is capped so the level never rises above the target decay line, which
    keeps the recording's noise floor down. Where the recording ends or reaches its noise floor, the tail is
    continued with random-phase noise that follows the target decay – so a 1 s room can become a 20 s space.
-   VLF and the late roll-off are applied as spectral gains.
+   VLF and the late roll-off are applied as spectral gains. **Smooth** lowers bins that stick out of their
+   third-octave neighbourhood (measured with the native decay removed, so long ringing counts as much as loud) and
+   pulls each band envelope towards its fitted decay line.
 4. **Assembly**: early part (own or from the selected pattern, with roll-off), late part shifted by the pre-delay,
    plus delay voices.
 
@@ -168,7 +171,7 @@ What the tests cover:
   per-band analysis, exact reproduction with neutral settings, decay scaling ×0.35 … ×3 and extension beyond the
   recording, multi-band multipliers, pre-delay, levels, delay voices, roll-off, VLF, early pattern swap,
   true stereo convolution against direct convolution for block sizes 1 … 4096, click-free IR switching while
-  audio runs, EQ gains, modulator and ducker.
+  audio runs, smooth (resonance and echo reduction at unchanged reverb time), EQ gains, modulator and ducker.
 * **Library** (real Bricasti files) – file name parsing, 134 presets in 6 categories, 32 distinct early patterns,
   quad files identical to L/R pairs, every preset loads and analyses plausibly, the decay control works on real
   presets.

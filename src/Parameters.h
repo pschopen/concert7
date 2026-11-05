@@ -38,9 +38,10 @@ namespace ParamID
     inline constexpr const char* highFreq      = "highFreq";
     inline constexpr const char* highMult      = "highMult";
 
-    // modulation + ducker
+    // extras: modulation, smooth, ducker
     inline constexpr const char* modDepth      = "modDepth";
     inline constexpr const char* modRate       = "modRate";
+    inline constexpr const char* smooth        = "smooth";
     inline constexpr const char* duckAmount    = "duckAmount";
     inline constexpr const char* duckThreshold = "duckThreshold";
     inline constexpr const char* duckRelease   = "duckRelease";

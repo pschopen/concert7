@@ -233,6 +233,73 @@ public:
             expectGreaterThan (lfSrc - lfIr, 12.0f);
         }
 
+        beginTest ("smooth keeps reverb time and level");
+        {
+            auto p = neutral;
+            p.smooth = 1.0f;
+            auto ir = designIR (*src, nullptr, p);
+            const float rt = rtOf (*ir);
+            const int from = src->onset + (int) (0.15 * sr);
+            const double ratioDb = 10.0 * std::log10 (energy (ir->ch[0], from) / energy (src->ch[0], from));
+            logMessage ("  RT " + String (rt, 3) + " s (native " + String (src->nativeRT, 3) + " s), late level "
+                        + String (ratioDb, 2) + " dB");
+            expectWithinAbsoluteError (rt, src->nativeRT, src->nativeRT * 0.1f);
+            expectWithinAbsoluteError (ratioDb, 0.0, 1.5);
+        }
+
+        beginTest ("smooth evens out a ringing resonance");
+        {
+            // decaying 1 kHz sine that rings longer than the noise reverb
+            auto ch = syntheticIR (1.6f, 2.5f, sr, 31);
+            const int onset = (int) (0.01 * sr);
+            const double k = std::log (1000.0) / (3.0 * sr);
+            for (size_t c = 0; c < 4; ++c)
+                for (int i = onset; i < (int) ch[c].size(); ++i)
+                    ch[c][(size_t) i] += 0.17f * (float) (std::exp (-k * (i - onset))
+                                                          * std::sin (2.0 * MathConstants<double>::pi * 1000.0 * i / sr + (double) c));
+            auto ringing = makeSourceIR (std::move (ch), true, sr, sr, "ringing");
+            DesignParams p;
+            p.decay = ringing->nativeRT;
+            p.smooth = 1.0f;
+            auto ir = designIR (*ringing, nullptr, p);
+
+            const int from = ringing->onset + (int) (0.1 * sr);
+            auto prominence = [&] (const std::vector<float>& x) {
+                const float peak = bandEnergyDb (x, sr, 990.0f, 1010.0f, from) - 10.0f * std::log10 (20.0f);
+                const float lo = bandEnergyDb (x, sr, 700.0f, 900.0f, from), hi = bandEnergyDb (x, sr, 1100.0f, 1300.0f, from);
+                return peak - (10.0f * std::log10 (0.5f * (std::pow (10.0f, lo / 10.0f) + std::pow (10.0f, hi / 10.0f))) - 10.0f * std::log10 (200.0f));
+            };
+            const float before = prominence (ringing->ch[0]), after = prominence (ir->ch[0]);
+            logMessage ("  1 kHz peak over its neighbourhood: " + String (before, 1) + " dB -> " + String (after, 1) + " dB");
+            expectGreaterThan (before - after, 5.0f);
+        }
+
+        beginTest ("smooth flattens a late echo in the envelope");
+        {
+            // 40 ms noise burst 12 dB above the decay at 0.5 s
+            auto ch = syntheticIR (1.6f, 2.5f, sr, 41);
+            const int onset = (int) (0.01 * sr), at = onset + (int) (0.5 * sr), burst = (int) (0.04 * sr);
+            const float amp = 4.0f * std::pow (10.0f, -3.0f * 0.5f / 1.6f);
+            Random rng (43);
+            for (auto& c : ch)
+                for (int i = at; i < at + burst; ++i)
+                    c[(size_t) i] += amp * (rng.nextFloat() * 2.0f - 1.0f) * (float) std::sin (MathConstants<double>::pi * (i - at) / burst);
+            auto echo = makeSourceIR (std::move (ch), true, sr, sr, "echo");
+            DesignParams p;
+            p.decay = echo->nativeRT;
+            p.smooth = 1.0f;
+            auto ir = designIR (*echo, nullptr, p);
+
+            // energy of the echo window over the decay line through the windows before and after it
+            auto excessDb = [&] (const std::vector<float>& x) {
+                auto e = [&] (double a, double b) { return energy (x, onset + (int) (a * sr), onset + (int) (b * sr)); };
+                return 10.0 * std::log10 (e (0.49, 0.55) / std::sqrt (e (0.40, 0.46) * e (0.58, 0.64)));
+            };
+            const double before = excessDb (echo->ch[0]), after = excessDb (ir->ch[0]);
+            logMessage ("  echo over the decay line: " + String (before, 1) + " dB -> " + String (after, 1) + " dB");
+            expectGreaterThan (before - after, 3.0);
+        }
+
         beginTest ("early reflection pattern swap");
         {
             auto other = makeSourceIR (syntheticIR (0.5f, 1.0f, sr, 99, 0.03f), true, sr, sr, "pattern");

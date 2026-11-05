@@ -15,7 +15,9 @@
 //  3. In the STFT domain every bin receives a time-varying gain that turns the
 //     native decay slope into the target slope. Beyond the valid region the
 //     tail is continued with random-phase noise that follows the target decay,
-//     so the reverb can be made longer than the recording.
+//     so the reverb can be made longer than the recording. "Smooth" pulls each
+//     bin towards its third-octave neighbourhood (resonances, ringing) and each
+//     band envelope towards its fitted decay line (bumps, late echoes).
 //  4. Early part (optionally from another preset = "early pattern"), late part
 //     (shifted by the pre-delay) and delay voices are summed with their levels.
 
@@ -51,6 +53,7 @@ struct SourceIR
     std::vector<float> bandValidEnd; // seconds after onset where each band hits its floor
     std::vector<float> bandIntercept;  // dB at the onset of the fitted decay line (same scale as bandLevelDb)
     std::vector<std::vector<float>> bandLevelDb; // smoothed band level per STFT frame (sum of channels)
+    std::vector<float> binColourDb;  // late reverb level of each STFT bin relative to its third-octave neighbourhood
 
     int length() const { return (int) ch[0].size(); }
 };
@@ -70,6 +73,7 @@ struct DesignParams
     float lowMult = 1.0f;
     float highFreq = 4000.0f;
     float highMult = 1.0f;
+    float smooth = 0.0f;         // 0 .. 1: evens out resonances and envelope bumps of the late reverb
 
     bool operator== (const DesignParams& o) const;
     bool operator!= (const DesignParams& o) const { return ! (*this == o); }
