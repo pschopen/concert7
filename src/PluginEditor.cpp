@@ -363,6 +363,16 @@ void MainPanel::timerCallback()
             categoryButtons[i]->setToggleState (id.startsWith (categories[(int) i] + "/"), dontSendNotification);
     }
 
+    // double-click on DECAY returns to the native decay of the current preset
+    if (status.nativeRT > 0.0f && status.nativeRT != lastNativeRT)
+    {
+        lastNativeRT = status.nativeRT;
+        if (auto* p = state.getParameter (ParamID::decay))
+            for (auto& k : knobs)
+                if (k->getParamID() == ParamID::decay)
+                    k->getSlider().setDoubleClickReturnValue (true, p->convertFrom0to1 (p->convertTo0to1 (jlimit (0.2f, 30.0f, status.nativeRT))));
+    }
+
     for (auto& k : knobs) k->repaint(); // values may change by automation
     if (currentTab == 1) decayView.repaint();
 
