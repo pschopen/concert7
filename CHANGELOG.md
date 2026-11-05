@@ -18,6 +18,7 @@
     rebuilding the impulse response
 - New DIRECT tab for the dry signal: HIGHS (shelf at 3 kHz), AIR (air absorption, loss at 10 kHz), WIDTH (narrowed
   around the source's own position), DELAY, and REVERB GAP (the whole reverb starts later than the direct sound)
+- Every control, tab and preset category now has a tooltip that explains in plain words what it does
 - Choosing a preset, also the current one again, resets all controls to their defaults and DECAY to the preset's
   own decay ("Hold decay when changing presets" still keeps the decay, a hall model's included). Hall model and
   Distance are switched off

@@ -439,6 +439,29 @@ public:
             auto img = ed->createComponentSnapshot (ed->getLocalBounds());
             expectEquals (img.getWidth(), ed->getWidth());
         }
+
+        beginTest ("every control has a tooltip");
+        {
+            std::unique_ptr<AudioProcessorEditor> ed (proc.createEditor());
+            int controls = 0;
+            std::function<void (Component&)> visit = [&] (Component& c) {
+                auto* knob = dynamic_cast<Knob*> (&c);
+                if (knob != nullptr || dynamic_cast<Button*> (&c) != nullptr || dynamic_cast<ComboBox*> (&c) != nullptr)
+                {
+                    ++controls;
+                    auto* tip = dynamic_cast<TooltipClient*> (&c);
+                    const auto name = knob != nullptr ? knob->getParamID() : c.getName().isNotEmpty() ? c.getName()
+                                    : dynamic_cast<Button*> (&c) != nullptr ? static_cast<Button&> (c).getButtonText()
+                                    : String ("combo box");
+                    expect (tip != nullptr && tip->getTooltip().isNotEmpty(), "no tooltip: " + name);
+                }
+                if (knob != nullptr) return; // its slider carries the same tooltip
+                for (auto* child : c.getChildren())
+                    visit (*child);
+            };
+            visit (*ed);
+            expectGreaterThan (controls, 60);
+        }
     }
 };
 

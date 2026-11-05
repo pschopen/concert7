@@ -697,6 +697,10 @@ WelcomeOverlay::WelcomeOverlay (Concert7Processor& p) : processor (p)
     pageButton.setButtonText (tr ("Open download page", u8"Download-Seite öffnen"));
     zipButton.setButtonText (tr ("Choose ZIP file...", u8"ZIP-Datei auswählen …"));
     folderButton.setButtonText (tr ("Already unpacked? Choose folder...", u8"Schon entpackt? Ordner wählen …"));
+    pageButton.setTooltip ("Opens Samplicity's downloads page; the Bricasti M7 archive is listed at the bottom.");
+    zipButton.setTooltip ("Pick the downloaded ZIP (about 1 GB). Concert7 checks it and installs the impulse responses.");
+    folderButton.setTooltip ("Use a folder with unpacked impulse responses, your own included.");
+    closeButton.setTooltip ("Closes the setup. It stays available under SETUP.");
 
     for (auto* b : { &pageButton, &zipButton, &folderButton, &closeButton })
     {

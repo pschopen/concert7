@@ -33,7 +33,7 @@ private:
 };
 
 /** Reverb time over frequency: native preset (dashed) and the current target. */
-class DecayView : public juce::Component
+class DecayView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit DecayView (juce::AudioProcessorValueTreeState& s) : state (s) {}
@@ -47,7 +47,7 @@ private:
 
 /** Distance mode: top view of the hall with source, listener, critical distance and the
     path of the first reflection, plus the values of the distance model. */
-class DistanceView : public juce::Component
+class DistanceView : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit DistanceView (Concert7Processor& p) : processor (p) {}
@@ -58,7 +58,7 @@ private:
 };
 
 /** Interactive response curve of the post EQ. Nodes can be dragged; the wheel changes Q. */
-class EQView : public juce::Component, private juce::Timer
+class EQView : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
 {
 public:
     EQView (juce::AudioProcessorValueTreeState& state, Concert7Processor& proc);

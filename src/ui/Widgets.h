@@ -10,11 +10,14 @@
 namespace concert7
 {
 /** Rotary knob with a caption above and the value below, bound to a parameter. */
-class Knob : public juce::Component, private juce::Slider::Listener
+class Knob : public juce::Component, public juce::SettableTooltipClient, private juce::Slider::Listener
 {
 public:
     Knob (juce::AudioProcessorValueTreeState& state, const juce::String& paramID, const juce::String& caption,
           bool bipolar = false);
+
+    /** Shown over the whole knob, caption and value included. */
+    void setTooltip (const juce::String& text) override;
 
     void resized() override;
     void paint (juce::Graphics&) override;
@@ -68,7 +71,7 @@ private:
 };
 
 /** Vertical stereo peak meter with decay. */
-class StereoMeter : public juce::Component
+class StereoMeter : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit StereoMeter (juce::String text) : caption (std::move (text)) {}

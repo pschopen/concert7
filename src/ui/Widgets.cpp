@@ -30,6 +30,12 @@ Knob::Knob (AudioProcessorValueTreeState& s, const String& id, const String& cap
         slider.setDoubleClickReturnValue (true, parameter->convertFrom0to1 (parameter->getDefaultValue()));
 }
 
+void Knob::setTooltip (const String& text)
+{
+    SettableTooltipClient::setTooltip (text);
+    slider.setTooltip (text);
+}
+
 String Knob::getValueText() const
 {
     if (overridden) return overrideText;

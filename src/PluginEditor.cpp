@@ -11,6 +11,125 @@ namespace
 {
     constexpr int kFaceHeight = 172;
     const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS", "DIRECT", "SPACE" };
+    const char* const kTabTooltips[] = {
+        "Early reflections, late reverb, delay and stereo propagation",
+        "Decay time of the lows and highs, separately",
+        "Equalizer for the reverb signal (the dry signal is not affected)",
+        "Modulation, Smooth and ducking",
+        "Tone, width and timing of the dry signal",
+        "Set the reverb by hall size, or place a dry source nearer or further away"
+    };
+
+    /** What a control does, for the end user. Knobs, toggles and combo boxes are looked up by their parameter. */
+    String tooltipFor (const String& paramID)
+    {
+        static const std::map<String, String> tips {
+            // main
+            { ParamID::predelay, "Time before the late reverb starts. More pre-delay keeps vocals and instruments clear "
+                                 "in front of the reverb; the early reflections stay where they are." },
+            { ParamID::decay, "How long the reverb rings out (RT60). Starts at the preset's own decay. "
+                              "Set by the hall model while SPACE > ON is active." },
+            { ParamID::early, "Level of the early reflections - the first echoes that tell the ear how big the room is. "
+                              "All the way down: off." },
+            { ParamID::late, "Level of the late reverb, the dense tail. All the way down: off." },
+            { ParamID::mix, "Balance between dry (0 %) and reverb (100 %). Use 100 % on a send/aux. "
+                            "Set by the distance mode while it is on." },
+            { ParamID::gain, "Output level after the mix." },
+            // reverb
+            { ParamID::erPattern, "Swaps the early reflections for those of another preset (1 = shortest ... 32 = longest). "
+                                  "\"Preset\" keeps the preset's own." },
+            { ParamID::erRolloff, "Darkens the early reflections. Off = full bandwidth." },
+            { ParamID::lateRolloff, "Darkens the reverb tail, like a hall with soft surfaces. Off = full bandwidth." },
+            { ParamID::vlf, "Level of the deep bass in the reverb (below about 120 Hz). "
+                            "Turn it down if the reverb muddies the low end." },
+            { ParamID::predelaySync, "Sets the pre-delay as a note value of the host tempo." },
+            { ParamID::predelayNote, "Note value for the pre-delay (only with SYNC)." },
+            { ParamID::delayTime, "Spacing of the echoes. The delay adds three repeats of the reverb - a rhythmic reverb tail." },
+            { ParamID::delayLevel, "Volume of the echoes. All the way down: delay off." },
+            { ParamID::delaySync, "Sets the delay time as a note value of the host tempo." },
+            { ParamID::delayNote, "Note value for the delay (only with SYNC)." },
+            { ParamID::crossfeed, "How the input reaches the reverb. True Stereo: each side excites the whole room, as recorded. "
+                                  "No Crossfeed: left stays left, right stays right - more defined. "
+                                  "Mono In: both channels summed - the source sits in the centre." },
+            // decay
+            { ParamID::lowFreq, "Below this frequency, LOW MULT changes the decay." },
+            { ParamID::lowMult, "Decay of the lows relative to DECAY. Above 1x: warmer, longer bass. Below 1x: tighter bass." },
+            { ParamID::highFreq, "Above this frequency, HIGH MULT changes the decay." },
+            { ParamID::highMult, "Decay of the highs relative to DECAY. Below 1x: darker tail, like real halls. "
+                                 "Above 1x: brighter, airier." },
+            // eq
+            { ParamID::eqOn, "Switches the whole EQ on or off. It only affects the reverb." },
+            { ParamID::eqHpOn, "High-pass - removes rumble and low mud from the reverb." },
+            { ParamID::eqHpFreq, "Cut-off frequency of the high-pass." },
+            { ParamID::eqLowType, "Shelf raises or lowers everything below the frequency; Bell only the range around it." },
+            { ParamID::eqLowFreq, "Centre or corner frequency of the low band." },
+            { ParamID::eqLowGain, "Boost or cut of the low band." },
+            { ParamID::eqLowQ, "Bandwidth of the low band. Low values: wide. High values: narrow." },
+            { ParamID::eqMidFreq, "Centre frequency of the mid band." },
+            { ParamID::eqMidGain, "Boost or cut of the mid band." },
+            { ParamID::eqMidQ, "Bandwidth of the mid band. Low values: wide. High values: narrow." },
+            { ParamID::eqHighType, "Shelf raises or lowers everything above the frequency; Bell only the range around it." },
+            { ParamID::eqHighFreq, "Centre or corner frequency of the high band." },
+            { ParamID::eqHighGain, "Boost or cut of the high band." },
+            { ParamID::eqHighQ, "Bandwidth of the high band. Low values: wide. High values: narrow." },
+            { ParamID::eqLpOn, "Low-pass - removes harsh highs from the reverb." },
+            { ParamID::eqLpFreq, "Cut-off frequency of the low-pass." },
+            // extras
+            { ParamID::modDepth, "Slight pitch movement in the reverb: livelier, less metallic. 0 = off." },
+            { ParamID::modRate, "Speed of the modulation." },
+            { ParamID::smooth, "Evens out ringing frequencies and bumps in the tail. "
+                               "Helps when a preset rings or flutters at long decay times." },
+            { ParamID::duckAmount, "How far the reverb is lowered while the signal plays; it comes back in the pauses. "
+                                   "Keeps vocals clear with a lot of reverb. Off = no ducking." },
+            { ParamID::duckThreshold, "Input level above which ducking starts." },
+            { ParamID::duckRelease, "How quickly the reverb comes back once the signal gets quiet." },
+            { ParamID::duckSidechain, "Ducking follows the DAW's sidechain input instead of the plugin's own input - "
+                                      "e.g. the band's reverb ducks under the lead vocal." },
+            // direct
+            { ParamID::directHighs, "Presence of the dry signal. Plus: closer and brighter. Minus: further away. "
+                                    "Set by the distance mode while SPACE > DISTANCE is on." },
+            { ParamID::directAir, "Damps the highest frequencies of the dry signal, as over a long distance through air. "
+                                  "Set by the distance mode while SPACE > DISTANCE is on." },
+            { ParamID::directWidth, "Stereo width of the dry signal. 100 % = unchanged, 0 % = mono. "
+                                    "Set by the distance mode while SPACE > DISTANCE is on." },
+            { ParamID::directDelay, "Delays the dry signal, e.g. to align a spot microphone with a main pair. "
+                                    "Set by the distance mode while SPACE > DISTANCE is on." },
+            { ParamID::directGap, "Delays the whole reverb, including the early reflections, against the dry signal. "
+                                  "A larger gap makes the source sound closer. "
+                                  "Set by the distance mode while SPACE > DISTANCE is on." },
+            // space
+            { ParamID::hallOn, "Sets the reverb by the size of the hall and its surfaces instead of DECAY. "
+                               "Switching it on or off keeps the current sound." },
+            { ParamID::hallVolume, String (CharPointer_UTF8 ("Size of the hall. Bigger = longer reverb "
+                                                             "(about 16 000 m\xc2\xb3 = large concert hall).")) },
+            { ParamID::hallAbsorption, "How much the surfaces absorb - from stone church (very reverberant) to studio (dry)." },
+            { ParamID::distOn, "Places the dry source nearer or further away in the hall; MIX and DIRECT follow automatically. "
+                               "Switching it on or off keeps the current sound. Use it as an insert on a dry track." },
+            { ParamID::distance, "Distance from the source to the listener. Further = more reverb, less presence." },
+            { ParamID::distWidthOn, "Narrows the dry signal to the width the source appears at this distance." },
+            { ParamID::distWidth, "Real width of the source (e.g. 2 m for a piano, 15 m for an orchestra). Only with NARROW." },
+            { ParamID::distAlign, "Delays the dry signal by the sound's travel time - for spot microphones against a main pair." },
+            { ParamID::distMic, "Distance from the spot microphone to the source. Only with TIME ALIGN." },
+        };
+        const auto it = tips.find (paramID);
+        return it != tips.end() ? it->second : String();
+    }
+
+    String categoryTooltip (const String& category)
+    {
+        static const std::map<String, String> tips {
+            { "Halls", "Concert halls - long, smooth reverb for orchestra, choir, piano and strings." },
+            { "Plates", "Plate reverbs - dense and bright, without room reflections. Classic on vocals and snare." },
+            { "Rooms", "Small and medium rooms - short, natural ambience for drums, guitars and dialogue." },
+            { "Chambers", "Echo chambers - dense, warm studio reverb." },
+            { "Ambiences", "Very short reverb that adds space without an audible tail." },
+            { "Spaces", "Real places - churches, a scoring stage, an arena, a car park, a cavern, outdoor spaces - "
+                        "and a gated reverb." },
+            { "User", "Your own impulse responses from the IR folder (WAV, AIFF, FLAC)." },
+        };
+        const auto it = tips.find (category);
+        return it != tips.end() ? it->second : "Presets in " + category;
+    }
 }
 
 //==============================================================================
@@ -24,7 +143,8 @@ MainPanel::MainPanel (Concert7Processor& p)
         if (processor.getShared().hasLibrary()) showPresetMenu ({}, &display);
         else showWelcome (true);
     };
-    display.setTooltip ("Click to browse the presets");
+    display.setTooltip ("Shows the preset, the value of the last control you touched and the decay envelope. "
+                        "Click to choose a preset.");
     addAndMakeVisible (display);
     for (auto* b : { &prevButton, &nextButton, &browseButton })
     {
@@ -36,6 +156,7 @@ MainPanel::MainPanel (Concert7Processor& p)
     browseButton.onClick = [this] { showPresetMenu ({}, &browseButton); };
     prevButton.setTooltip ("Previous preset");
     nextButton.setTooltip ("Next preset");
+    browseButton.setTooltip ("Opens the list of all presets, sorted by category");
 
     // ---- main controls
     addKnob (knobs, *this, ParamID::predelay, "PRE-DELAY");
@@ -44,6 +165,8 @@ MainPanel::MainPanel (Concert7Processor& p)
     addKnob (knobs, *this, ParamID::late, "LATE");
     addKnob (knobs, *this, ParamID::mix, "MIX");
     addKnob (knobs, *this, ParamID::gain, "GAIN", true);
+    inMeter.setTooltip ("Input level");
+    outMeter.setTooltip ("Output level");
     addAndMakeVisible (inMeter);
     addAndMakeVisible (outMeter);
 
@@ -56,10 +179,12 @@ MainPanel::MainPanel (Concert7Processor& p)
         b.setRadioGroupId (1001);
         b.setClickingTogglesState (true);
         b.onClick = [this, i] { showTab (i); };
+        b.setTooltip (kTabTooltips[i]);
         addAndMakeVisible (b);
         addChildComponent (pages[(size_t) i]);
     }
     setupButton.onClick = [this] { showSetupMenu(); };
+    setupButton.setTooltip ("Impulse response library, interface size, hold decay on preset change, reset");
     addAndMakeVisible (setupButton);
 
     // reverb page
@@ -78,6 +203,11 @@ MainPanel::MainPanel (Concert7Processor& p)
     for (Component* c : std::initializer_list<Component*> { predelaySync.get(), delaySync.get(), predelayNote.get(),
                                                             delayNote.get(), crossfeed.get() })
         rev.addAndMakeVisible (c);
+    predelaySync->setTooltip (tooltipFor (ParamID::predelaySync));
+    delaySync->setTooltip (tooltipFor (ParamID::delaySync));
+    predelayNote->setTooltip (tooltipFor (ParamID::predelayNote));
+    delayNote->setTooltip (tooltipFor (ParamID::delayNote));
+    crossfeed->setTooltip (tooltipFor (ParamID::crossfeed));
     for (auto [label, text] : { std::pair<Label*, const char*> { &crossfeedLabel, "PROPAGATION" },
                                 { &predelayNoteLabel, "PRE-DELAY NOTE" }, { &delayNoteLabel, "DELAY NOTE" } })
     {
@@ -94,10 +224,13 @@ MainPanel::MainPanel (Concert7Processor& p)
     addKnob (knobs, dec, ParamID::lowMult, "LOW MULT");
     addKnob (knobs, dec, ParamID::highFreq, "HIGH FREQ");
     addKnob (knobs, dec, ParamID::highMult, "HIGH MULT");
+    decayView.setTooltip ("Reverb time over frequency. Dashed = the preset as recorded, solid = your setting.");
     dec.addAndMakeVisible (decayView);
 
     // eq page
     auto& eqp = pages[2];
+    eqView.setTooltip ("Drag a point to change frequency and gain. Mouse wheel: Q. "
+                       "Double-click: switches HP/LP on or off, or resets the gain to 0 dB.");
     eqp.addAndMakeVisible (eqView);
     addKnob (knobs, eqp, ParamID::eqHpFreq, "FREQ");
     addKnob (knobs, eqp, ParamID::eqLowFreq, "FREQ");
@@ -117,6 +250,11 @@ MainPanel::MainPanel (Concert7Processor& p)
     eqHighType = std::make_unique<ParamCombo> (state, ParamID::eqHighType);
     for (Component* c : std::initializer_list<Component*> { eqOn.get(), eqHpOn.get(), eqLpOn.get(), eqLowType.get(), eqHighType.get() })
         eqp.addAndMakeVisible (c);
+    eqOn->setTooltip (tooltipFor (ParamID::eqOn));
+    eqHpOn->setTooltip (tooltipFor (ParamID::eqHpOn));
+    eqLpOn->setTooltip (tooltipFor (ParamID::eqLpOn));
+    eqLowType->setTooltip (tooltipFor (ParamID::eqLowType));
+    eqHighType->setTooltip (tooltipFor (ParamID::eqHighType));
 
     // extras page
     auto& ext = pages[3];
@@ -127,6 +265,7 @@ MainPanel::MainPanel (Concert7Processor& p)
     addKnob (knobs, ext, ParamID::duckRelease, "RELEASE");
     addKnob (knobs, ext, ParamID::smooth, "SMOOTH");
     duckSidechain = std::make_unique<ParamToggle> (state, ParamID::duckSidechain, "SIDECHAIN");
+    duckSidechain->setTooltip (tooltipFor (ParamID::duckSidechain));
     ext.addAndMakeVisible (*duckSidechain);
 
     // direct page: the dry signal and the gap before the reverb
@@ -145,28 +284,22 @@ MainPanel::MainPanel (Concert7Processor& p)
     addKnob (knobs, dst, ParamID::distWidth, "SRC WIDTH");
     addKnob (knobs, dst, ParamID::distMic, "MIC DIST");
     hallOn = std::make_unique<ParamToggle> (state, ParamID::hallOn, "ON");
-    hallOn->setTooltip ("Sets the reverb by the size of the hall and how much it absorbs (stone, wood, audience ...): "
-                        "DECAY follows from both (Eyring) and is greyed out. While it is off, the greyed knobs show the "
-                        "hall that matches the current decay; switching it on starts exactly there. Works on a send too.");
     distOn = std::make_unique<ParamToggle> (state, ParamID::distOn, "ON");
     distAlign = std::make_unique<ParamToggle> (state, ParamID::distAlign, "TIME ALIGN");
     distWidthOn = std::make_unique<ParamToggle> (state, ParamID::distWidthOn, "NARROW");
-    distOn->setTooltip ("Moves the dry signal nearer or further away in the hall. While it is off, the greyed DISTANCE "
-                        "shows where your current mix places the source; switching it on starts exactly there without "
-                        "changing the sound. MIX and the DIRECT controls (presence, air absorption, width, delay, reverb "
-                        "gap) then follow the distance and show the values in effect; switching it off keeps them. "
-                        "Use Concert7 as an insert on a dry source.");
-    distAlign->setTooltip ("Adds the travel time of the sound (distance minus MIC DIST) to DIRECT > DELAY, "
-                           "e.g. to align a spot microphone with the main pair");
-    distWidthOn->setTooltip ("Narrows the stereo image of the direct sound to the angle a source of SRC WIDTH covers "
-                             "at this distance, around the source's own panorama position");
     for (Component* c : std::initializer_list<Component*> { hallOn.get(), distOn.get(), distAlign.get(), distWidthOn.get() })
         dst.addAndMakeVisible (c);
+    hallOn->setTooltip (tooltipFor (ParamID::hallOn));
+    distOn->setTooltip (tooltipFor (ParamID::distOn));
+    distAlign->setTooltip (tooltipFor (ParamID::distAlign));
+    distWidthOn->setTooltip (tooltipFor (ParamID::distWidthOn));
+    distanceView.setTooltip ("Top view of the hall: source, listener, first reflection and the critical distance "
+                             "(where direct sound and reverb are equally loud).");
     dst.addAndMakeVisible (distanceView);
     hallDecayLabel.setFont (labelFont (9.5f));
     hallDecayLabel.setJustificationType (Justification::centred);
     hallDecayLabel.setColour (Label::textColourId, Colours::textDim);
-    hallDecayLabel.setTooltip ("The decay the hall gives (DECAY is greyed out while the hall model is on)");
+    hallDecayLabel.setTooltip ("The decay this hall gives.");
     dst.addAndMakeVisible (hallDecayLabel);
 
     tabButtons[0].setToggleState (true, dontSendNotification);
@@ -198,6 +331,7 @@ Knob& MainPanel::addKnob (std::vector<std::unique_ptr<Knob>>& list, Component& p
 {
     auto k = std::make_unique<Knob> (state, id, caption, bipolar);
     k->onTouched = [this] (Knob& kn) { touch (kn); };
+    k->setTooltip (tooltipFor (id));
     parent.addAndMakeVisible (*k);
     list.push_back (std::move (k));
     return *list.back();
@@ -224,7 +358,7 @@ void MainPanel::rebuildCategoryButtons()
         auto b = std::make_unique<TextButton> (IRLibrary::shortCategoryName (c));
         b->getProperties().set ("led", true);
         b->getProperties().set ("fontHeight", 10.5f);
-        b->setTooltip ("Presets in " + c);
+        b->setTooltip (categoryTooltip (c));
         b->onClick = [this, c, ptr = b.get()] { showPresetMenu (c, ptr); };
         addAndMakeVisible (*b);
         categoryButtons.push_back (std::move (b));
