@@ -31,6 +31,9 @@ namespace
     constexpr float kSmoothRampSeconds = 0.05f; // Smooth: envelope correction fades in after the split
     constexpr float kSmoothLowHz      = 40.0f;  // Smooth: frequency range of the resonance correction
     constexpr float kSmoothHighHz     = 16000.0f;
+    constexpr float kVariantMatchSeconds = 0.01f; // late variant: block length of its energy match
+    constexpr float kVariantMaxGain   = 4.0f;
+    constexpr int64 kVariantSeed      = 0x7a11;
     constexpr double kPi = MathConstants<double>::pi;
 
     int stftSizeFor (double sr) { return sr <= 50000.0 ? 2048 : (sr <= 100000.0 ? 4096 : 8192); }
@@ -289,6 +292,69 @@ namespace
         }
         return best;
     }
+
+    /** The late reverb with an independent fine structure: every STFT frame gets new random phases (the same
+        for all channels, so their relation stays), then a short-time energy match restores the envelope. */
+    std::array<std::vector<float>, 4> makeVariant (const std::array<std::vector<float>, 4>& late,
+                                                   const std::vector<int>& chans, double sr)
+    {
+        std::array<std::vector<float>, 4> out;
+        const int len = (int) late[(size_t) chans.front()].size();
+        if (len == 0) return out;
+
+        Stft stft (stftSizeFor (sr));
+        const int bins = stft.bins, frames = stft.numFrames (len);
+        const float synthGain = std::sqrt ((float) stft.N / (float) stft.hop); // incoherent overlap-add compensation
+        std::vector<float> re ((size_t) bins), im ((size_t) bins), norm ((size_t) len);
+        for (int c : chans)
+        {
+            auto& y = out[(size_t) c];
+            y.assign ((size_t) len, 0.0f);
+            std::fill (norm.begin(), norm.end(), 0.0f);
+            for (int m = 0; m < frames; ++m)
+            {
+                stft.forward (late[(size_t) c].data(), len, m, re.data(), im.data());
+                Random rng (kVariantSeed + 7919 * (int64) m); // per frame: the same phases for every channel
+                for (int k = 0; k < bins; ++k)
+                {
+                    const float phase = rng.nextFloat() * MathConstants<float>::twoPi;
+                    const float g = (k == 0 || k == bins - 1) ? 0.0f : synthGain;
+                    const float c0 = std::cos (phase) * g, s0 = std::sin (phase) * g;
+                    const float r = re[(size_t) k], i = im[(size_t) k];
+                    re[(size_t) k] = r * c0 - i * s0;
+                    im[(size_t) k] = r * s0 + i * c0;
+                }
+                stft.inverseAccumulate (re.data(), im.data(), m, y.data(), norm.data(), len);
+            }
+            for (int n = 0; n < len; ++n)
+                y[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
+        }
+
+        // energy match in short blocks (all channels together), interpolated between the block centres
+        const int block = std::max (16, (int) (kVariantMatchSeconds * sr));
+        const int numBlocks = (len + block - 1) / block;
+        std::vector<float> gain ((size_t) numBlocks);
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            double eL = 0.0, eV = 0.0;
+            for (int c : chans)
+                for (int n = b * block; n < std::min (len, (b + 1) * block); ++n)
+                {
+                    eL += (double) late[(size_t) c][(size_t) n] * late[(size_t) c][(size_t) n];
+                    eV += (double) out[(size_t) c][(size_t) n] * out[(size_t) c][(size_t) n];
+                }
+            gain[(size_t) b] = eV > 1e-30 ? std::min (kVariantMaxGain, (float) std::sqrt (eL / eV)) : 0.0f;
+        }
+        for (int n = 0; n < len; ++n)
+        {
+            const float pos = jlimit (0.0f, (float) (numBlocks - 1), ((float) n + 0.5f) / (float) block - 0.5f);
+            const int b0 = (int) pos, b1 = std::min (numBlocks - 1, b0 + 1);
+            const float g = gain[(size_t) b0] + (pos - (float) b0) * (gain[(size_t) b1] - gain[(size_t) b0]);
+            for (int c : chans)
+                out[(size_t) c][(size_t) n] *= g;
+        }
+        return out;
+    }
 } // namespace
 
 bool DesignParams::operator== (const DesignParams& o) const
@@ -296,7 +362,8 @@ bool DesignParams::operator== (const DesignParams& o) const
     return decay == o.decay && predelayMs == o.predelayMs && offsetMs == o.offsetMs && earlyDb == o.earlyDb && lateDb == o.lateDb
         && vlfDb == o.vlfDb && erRolloffHz == o.erRolloffHz && lateRolloffHz == o.lateRolloffHz
         && delayMs == o.delayMs && delayDb == o.delayDb && lowFreq == o.lowFreq && lowMult == o.lowMult
-        && highFreq == o.highFreq && highMult == o.highMult && smooth == o.smooth;
+        && highFreq == o.highFreq && highMult == o.highMult && smooth == o.smooth
+        && splitLate == o.splitLate && lateVariant == o.lateVariant;
 }
 
 //==============================================================================
@@ -1032,20 +1099,20 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     total = std::min (total, maxLen + cut - pad);
     const int fadeIn = std::min (total - cut, std::max (8, (int) (kOffsetFadeSeconds * sr)));
 
-    for (int c : chans)
+    // early part plus late reverb with its delay voices, then the offset. Linear, so the early part and the
+    // late reverb assembled on their own add up to the whole response.
+    auto assemble = [&, total] (std::vector<float>& o, const std::vector<float>& e, float earlyGain,
+                                const std::vector<float>& l, float lateGain)
     {
-        auto& o = out->ch[(size_t) c];
         o.assign ((size_t) total, 0.0f);
-        const auto& e = early[(size_t) c];
         for (int n = 0; n < std::min (total, (int) e.size()); ++n)
-            o[(size_t) n] = e[(size_t) n] * gE;
+            o[(size_t) n] = e[(size_t) n] * earlyGain;
 
-        const auto& l = late[(size_t) c];
-        float g = gL;
+        float g = lateGain;
         for (int v = 0; v <= voices; ++v)
         {
             const int offset = pd + v * dd;
-            for (int n = 0; n < lateLen && n + offset < total; ++n)
+            for (int n = 0; n < (int) l.size() && n + offset < total; ++n)
                 o[(size_t) (n + offset)] += l[(size_t) n] * g;
             g *= gD;
         }
@@ -1063,7 +1130,9 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
                 o[(size_t) n] *= (float) (0.5 - 0.5 * std::cos (kPi * n / fadeIn));
         }
         o.insert (o.begin(), (size_t) pad, 0.0f);
-    }
+    };
+    for (int c : chans)
+        assemble (out->ch[(size_t) c], early[(size_t) c], gE, late[(size_t) c], gL);
     total = total - cut + pad;
 
     // mid band energy for the distance mode (the level of the reverb against the direct sound)
@@ -1113,6 +1182,33 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     out->rtTarget.resize (src.bandRT.size());
     for (size_t b = 0; b < src.bandRT.size(); ++b)
         out->rtTarget[b] = jlimit (0.05f, 120.0f, src.bandRT[b] * scale * decayMultiplier (src.bandFreq[b], p));
+
+    // ---- modulation: early part, late reverb and its variant as responses of their own
+    if (p.splitLate)
+    {
+        std::array<std::vector<float>, 4> variantLate;
+        if (p.lateVariant)
+            variantLate = makeVariant (late, chans, sr);
+        const std::vector<float> none;
+        for (int c : chans)
+        {
+            assemble (out->late[(size_t) c], none, 0.0f, late[(size_t) c], gL);
+            if (p.lateVariant)
+                assemble (out->variant[(size_t) c], none, 0.0f, variantLate[(size_t) c], gL);
+            assemble (out->ch[(size_t) c], early[(size_t) c], gE, none, 0.0f);
+        }
+
+        // the early part ends long before the late reverb: drop its trailing zeros (saves convolution)
+        int end = 1;
+        for (int c : chans)
+        {
+            const auto& e = out->ch[(size_t) c];
+            for (int n = (int) e.size() - 1; n >= end; --n)
+                if (e[(size_t) n] != 0.0f) { end = n + 1; break; }
+        }
+        for (int c : chans)
+            out->ch[(size_t) c].resize ((size_t) end);
+    }
 
     return out;
 }

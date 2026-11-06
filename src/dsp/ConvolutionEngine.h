@@ -14,7 +14,25 @@
 
 namespace concert7
 {
-/** Four zero latency partitioned convolvers forming a true stereo reverb. */
+/** Output of the convolution, one stereo pair per stream: the response (only its early part when the late
+    reverb is split off, see BuiltIR::late), the late reverb and its variant. Streams the response does not
+    have come out silent. */
+struct WetStreams
+{
+    static constexpr int kNumStreams = 3;   // main, late, variant
+    std::array<float*, 2 * kNumStreams> ch {};
+
+    float* l (int stream) const { return ch[(size_t) (2 * stream)]; }
+    float* r (int stream) const { return ch[(size_t) (2 * stream + 1)]; }
+    WetStreams operator+ (int offset) const
+    {
+        WetStreams s;
+        for (size_t i = 0; i < ch.size(); ++i) s.ch[i] = ch[i] + offset;
+        return s;
+    }
+};
+
+/** Four zero latency partitioned convolvers forming a true stereo reverb, per stream of the response. */
 class TrueStereoConvolver
 {
 public:
@@ -25,7 +43,7 @@ public:
     void unload();
 
     /** Real-time safe. scratch must hold 4 * numSamples floats. */
-    void process (const float* inL, const float* inR, float* outL, float* outR, int numSamples,
+    void process (const float* inL, const float* inR, const WetStreams& out, int numSamples,
                   bool crossfeed, float* scratch);
 
     bool isLoaded() const { return loaded; }
@@ -33,7 +51,12 @@ public:
     std::shared_ptr<const BuiltIR> getIR() const { return ir; }
 
 private:
-    std::array<std::unique_ptr<Convolver>, 4> conv;
+    using Set = std::array<std::unique_ptr<Convolver>, 4>;
+    void processSet (Set& set, const float* inL, const float* inR, float* outL, float* outR, int n,
+                     bool crossfeed, float* scratch);
+
+    std::array<Set, WetStreams::kNumStreams> sets;   // late and variant are created when first needed
+    std::array<bool, WetStreams::kNumStreams> used {};
     std::shared_ptr<const BuiltIR> ir;
     bool loaded = false;
     bool trueStereo = false;
@@ -61,6 +84,9 @@ public:
     bool loadIR (std::shared_ptr<const BuiltIR> ir, const std::function<bool()>& shouldAbort);
 
     /** Audio thread. Inputs may alias each other. Outputs are overwritten. */
+    void process (const float* inL, const float* inR, const WetStreams& out, int numSamples, bool crossfeed);
+
+    /** Audio thread. The streams summed without modulation: the whole response (variants are left out). */
     void process (const float* inL, const float* inR, float* outL, float* outR, int numSamples, bool crossfeed);
 
     std::shared_ptr<const BuiltIR> getActiveIR() const;
@@ -79,8 +105,17 @@ private:
 
     struct FeedBuffers
     {
-        void resize (int n) { l.assign ((size_t) n, 0.0f); r = ol = orr = l; sc.assign ((size_t) n * 4, 0.0f); }
-        std::vector<float> l, r, ol, orr, sc;
+        void resize (int n)
+        {
+            l.assign ((size_t) n, 0.0f);
+            r = l;
+            sc.assign ((size_t) n * 4, 0.0f);
+            out.assign ((size_t) n * 2 * WetStreams::kNumStreams, 0.0f);
+            for (size_t i = 0; i < streams.ch.size(); ++i)
+                streams.ch[i] = out.data() + i * (size_t) n;
+        }
+        std::vector<float> l, r, sc, out;
+        WetStreams streams;
     };
     void feedHistory (TrueStereoConvolver& c, juce::int64 from, juce::int64 to, bool crossfeed, FeedBuffers& buf);
 
@@ -93,8 +128,10 @@ private:
     std::atomic<juce::int64> written { 0 };
     juce::int64 pendingFedUpTo = 0;
 
-    std::vector<float> scratch, xfL, xfR;
-    FeedBuffers audioFeed; // used by the audio thread only
+    std::vector<float> scratch;
+    FeedBuffers crossfade;  // output of the pending convolver while fading (audio thread)
+    FeedBuffers summed;     // streams for the summing process() (audio thread)
+    FeedBuffers audioFeed;  // used by the audio thread only
     double sampleRate = 44100.0;
     int maxBlock = 512;
     size_t headBlock = 256, tailBlock = 8192;

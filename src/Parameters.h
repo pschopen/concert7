@@ -40,6 +40,7 @@ namespace ParamID
     inline constexpr const char* highMult      = "highMult";
 
     // extras: modulation, smooth, ducker
+    inline constexpr const char* modMode       = "modMode";
     inline constexpr const char* modDepth      = "modDepth";
     inline constexpr const char* modRate       = "modRate";
     inline constexpr const char* smooth        = "smooth";
@@ -89,8 +90,13 @@ inline constexpr float kVlfOffDb        = -21.0f;   // vlf
 inline constexpr float kDelayOffDb      = -21.0f;   // delay voices
 inline constexpr float kRolloffBypassHz = 20000.0f; // roll-off at or above is bypassed
 inline constexpr int   kNumErPatterns   = 32;
+inline constexpr float kMaxOffsetMs     = 5000.0f;  // irOffset: +-5 s
 
 enum class Crossfeed { TrueStereo = 0, NoCrossfeed, MonoIn };
+
+/** Modulation modes. Vibrato moves the pitch of the whole reverb (the mode of 0.1.x). The others leave the
+    early reflections alone and move only the late reverb: Chorus its pitch, Drift its fine structure. */
+enum class ModMode { Vibrato = 0, Chorus, Drift, DriftChorus };
 
 /** Note values available for tempo synced pre-delay / delay, in quarter notes. */
 struct NoteValue { const char* name; double quarters; };

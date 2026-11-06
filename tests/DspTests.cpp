@@ -206,6 +206,17 @@ public:
                 maxDiff = std::max (maxDiff, std::abs (earlier->ch[0][(size_t) i] - src->ch[0][(size_t) (i + sh)]));
             expectLessThan (maxDiff, 1e-6f, "start cut, rest unchanged");
             expectWithinAbsoluteError (earlier->onsetMs, (float) std::max (0.0, 1000.0 * src->onset / sr - 50.0), 0.05f);
+
+            // the whole range, +-5 s: longer than the response itself
+            p.offsetMs = kMaxOffsetMs;
+            auto latest = designIR (*src, nullptr, p);
+            const int maxSh = (int) std::lround (kMaxOffsetMs * 0.001 * sr);
+            expectEquals (latest->length(), src->length() + maxSh);
+            expectLessThan (energy (latest->ch[0], 0, maxSh), 1e-12, "5 s of leading silence");
+            p.offsetMs = -kMaxOffsetMs;
+            auto earliest = designIR (*src, nullptr, p);
+            expectGreaterOrEqual (earliest->length(), 1, "cut down to its last sample");
+            expectLessThan (energy (earliest->ch[0]), 1e-6, "nothing left");
         }
 
         beginTest ("early / late levels");
@@ -339,6 +350,101 @@ public:
             }
             expectLessThan (diff / ref, 1e-6);
         }
+
+        beginTest ("modulation: early part and late reverb add up to the whole response");
+        for (bool withDelay : { false, true })
+        {
+            auto p = neutral;
+            p.decay = src->nativeRT * 1.3f;
+            p.predelayMs = 20.0f;
+            if (withDelay) p.delayDb = -6.0f;
+            auto whole = designIR (*src, nullptr, p);
+            p.splitLate = p.lateVariant = true;
+            auto split = designIR (*src, nullptr, p);
+            expect (split->hasLate() && split->hasVariant());
+            expect (! whole->hasLate() && ! whole->hasVariant());
+            expectEquals (split->length(), whole->length());
+            expectLessThan ((int) split->ch[0].size(), src->onset + (int) (0.15 * sr), "the early part is short");
+            float maxDiff = 0.0f;
+            for (int c = 0; c < 4; ++c)
+                for (int i = 0; i < whole->length(); ++i)
+                {
+                    const auto& e = split->ch[(size_t) c];
+                    const float sum = (i < (int) e.size() ? e[(size_t) i] : 0.0f) + split->late[(size_t) c][(size_t) i];
+                    maxDiff = std::max (maxDiff, std::abs (sum - whole->ch[(size_t) c][(size_t) i]));
+                }
+            expectLessThan (maxDiff, 1e-5f);
+            expect (split->envelopeDb == whole->envelopeDb, "display unchanged");
+            expectWithinAbsoluteError (split->midEnergy, whole->midEnergy, 1e-6f);
+        }
+
+        beginTest ("modulation: the late variant keeps envelope, spectrum and channel relation, not the fine structure");
+        {
+            // channels 0 / 3 and 1 / 2 identical: the variant has to keep that
+            auto coupled = syntheticIR (1.6f, 2.5f, sr, 21);
+            coupled[3] = coupled[0];
+            coupled[2] = coupled[1];
+            auto s2 = makeSourceIR (coupled, true, sr, sr, "coupled");
+            auto p = neutral;
+            p.decay = s2->nativeRT;
+            p.splitLate = p.lateVariant = true;
+            auto ir = designIR (*s2, nullptr, p);
+            const auto& L = ir->late[0];
+            const auto& V = ir->variant[0];
+            expectEquals (V.size(), L.size());
+
+            float relDiff = 0.0f;
+            for (size_t i = 0; i < V.size(); ++i)
+                relDiff = std::max ({ relDiff, std::abs (ir->variant[3][i] - V[i]), std::abs (ir->variant[2][i] - ir->variant[1][i]) });
+            expectLessThan (relDiff, 1e-6f, "channel relation");
+
+            // envelope in 50 ms blocks, down to -50 dB
+            const int block = (int) (0.05 * sr);
+            double peak = 0.0;
+            for (int b = 0; (b + 1) * block <= (int) L.size(); ++b)
+                peak = std::max (peak, energy (L, b * block, (b + 1) * block));
+            float worst = 0.0f;
+            for (int b = 0; (b + 1) * block <= (int) L.size(); ++b)
+            {
+                const double eL = energy (L, b * block, (b + 1) * block), eV = energy (V, b * block, (b + 1) * block);
+                if (eL > peak * 1e-5)
+                    worst = std::max (worst, std::abs ((float) (10.0 * std::log10 (eV / eL))));
+            }
+            logMessage ("  envelope: largest block difference " + String (worst, 2) + " dB");
+            expectLessThan (worst, 1.0f);
+
+            // spectrum in octaves over the first second of the late reverb (both independent channel pairs)
+            const int from = s2->onset + (int) (ir->splitSeconds * sr);
+            float worstBand = 0.0f;
+            for (float fc = 125.0f; fc <= 8000.0f; fc *= 2.0f)
+            {
+                const float lo = fc * std::sqrt (0.5f), hi = fc * std::sqrt (2.0f);
+                double eL = 0.0, eV = 0.0;
+                for (int c : { 0, 1 })
+                {
+                    eL += std::pow (10.0, bandEnergyDb (ir->late[(size_t) c], sr, lo, hi, from) / 10.0);
+                    eV += std::pow (10.0, bandEnergyDb (ir->variant[(size_t) c], sr, lo, hi, from) / 10.0);
+                }
+                worstBand = std::max (worstBand, std::abs ((float) (10.0 * std::log10 (eV / eL))));
+            }
+            logMessage ("  spectrum: largest octave band difference " + String (worstBand, 2) + " dB");
+            expectLessThan (worstBand, 1.5f);
+
+            // fine structure: no correlation with the late reverb
+            double cross = 0.0, eL = 0.0, eV = 0.0;
+            for (int c = 0; c < 4; ++c)
+                for (size_t i = 0; i < L.size(); ++i)
+                {
+                    const double a = ir->late[(size_t) c][i], b = ir->variant[(size_t) c][i];
+                    cross += a * b; eL += a * a; eV += b * b;
+                }
+            const double corr = cross / std::sqrt (eL * eV);
+            logMessage ("  correlation late / variant " + String (corr, 3));
+            expectLessThan (std::abs (corr), 0.1);
+
+            auto again = designIR (*s2, nullptr, p);
+            expect (std::equal (V.begin(), V.end(), again->variant[0].begin()), "deterministic");
+        }
     }
 
     static float bandEnergyDb (const std::vector<float>& x, double sr, float lo, float hi, int from)
@@ -400,6 +506,56 @@ public:
                 peak = std::max (peak, (double) std::abs (ll[(size_t) i] + rl[(size_t) i]));
             }
             expectLessThan (maxErr / peak, 1e-4, "relative error");
+        }
+
+        beginTest ("split response: every stream is convolved with its own part");
+        {
+            auto split = std::make_shared<BuiltIR>();
+            split->sampleRate = sr;
+            split->trueStereo = true;
+            for (int c = 0; c < 4; ++c)
+            {
+                split->ch[(size_t) c].resize (2000);
+                split->late[(size_t) c].assign (8000, 0.0f);
+                split->variant[(size_t) c].assign (8000, 0.0f);
+                for (auto& v : split->ch[(size_t) c]) v = (rng.nextFloat() * 2.0f - 1.0f) * 0.1f;
+                for (int i = 1500; i < 8000; ++i)
+                {
+                    split->late[(size_t) c][(size_t) i] = (rng.nextFloat() * 2.0f - 1.0f) * 0.05f;
+                    split->variant[(size_t) c][(size_t) i] = (rng.nextFloat() * 2.0f - 1.0f) * 0.05f;
+                }
+            }
+            ConvolutionEngine engine;
+            const int block = 300;
+            engine.prepare (sr, block);
+            expect (engine.loadIR (split, {}));
+
+            const int total = 12000;
+            std::vector<float> inL (total), inR (total);
+            std::array<std::vector<float>, 6> out;
+            for (auto& o : out) o.resize (total);
+            for (int i = 0; i < total; ++i) { inL[(size_t) i] = rng.nextFloat() - 0.5f; inR[(size_t) i] = rng.nextFloat() - 0.5f; }
+            for (int pos = 0; pos < total; pos += block)
+            {
+                WetStreams streams;
+                for (size_t s = 0; s < out.size(); ++s) streams.ch[s] = out[s].data() + pos;
+                engine.process (inL.data() + pos, inR.data() + pos, streams, std::min (block, total - pos), true);
+            }
+            const std::array<const std::array<std::vector<float>, 4>*, 3> parts { &split->ch, &split->late, &split->variant };
+            for (int s = 0; s < 3; ++s)
+            {
+                const auto& h = *parts[(size_t) s];
+                auto ll = directConvolve (inL, h[0], total), rl = directConvolve (inR, h[2], total);
+                auto lr = directConvolve (inL, h[1], total), rr = directConvolve (inR, h[3], total);
+                double maxErr = 0.0, peak = 0.0;
+                for (int i = 0; i < total; ++i)
+                {
+                    maxErr = std::max (maxErr, (double) std::abs (out[(size_t) (2 * s)][(size_t) i] - (ll[(size_t) i] + rl[(size_t) i])));
+                    maxErr = std::max (maxErr, (double) std::abs (out[(size_t) (2 * s + 1)][(size_t) i] - (lr[(size_t) i] + rr[(size_t) i])));
+                    peak = std::max (peak, (double) std::abs (ll[(size_t) i] + rl[(size_t) i]));
+                }
+                expectLessThan (maxErr / peak, 1e-4, "stream " + String (s));
+            }
         }
 
         beginTest ("IR switch: warm-up + crossfade without discontinuities");
@@ -527,6 +683,88 @@ public:
             expectWithinAbsoluteError (Decibels::gainToDecibels ((float) std::sqrt (e / (n / 2) * 2.0)), 0.0f, 0.2f);
         }
 
+        beginTest ("tail modulator at zero depth adds the late reverb unchanged");
+        {
+            TailModulator m;
+            m.prepare (sr);
+            const int n = 1000;
+            std::vector<float> l (n), r (n), lateL (n), lateR (n), varL (n), varR (n);
+            Random rng (4);
+            for (int i = 0; i < n; ++i)
+            {
+                l[(size_t) i] = rng.nextFloat(); r[(size_t) i] = rng.nextFloat();
+                lateL[(size_t) i] = rng.nextFloat(); lateR[(size_t) i] = rng.nextFloat();
+                varL[(size_t) i] = rng.nextFloat(); varR[(size_t) i] = rng.nextFloat();
+            }
+            auto l0 = l, r0 = r;
+            m.process (l.data(), r.data(), lateL.data(), lateR.data(), varL.data(), varR.data(), n, 0.0f, 0.0f, 0.5f);
+            float maxDiff = 0.0f;
+            for (int i = 0; i < n; ++i)
+                maxDiff = std::max ({ maxDiff, std::abs (l[(size_t) i] - (l0[(size_t) i] + lateL[(size_t) i])),
+                                     std::abs (r[(size_t) i] - (r0[(size_t) i] + lateR[(size_t) i])) });
+            expectEquals (maxDiff, 0.0f);
+        }
+
+        beginTest ("drift keeps the level and keeps moving the late reverb");
+        {
+            TailModulator m;
+            m.prepare (sr);
+            const int n = (int) (10.0 * sr);
+            std::vector<float> l ((size_t) n, 0.0f), r ((size_t) n, 0.0f), lateL ((size_t) n), lateR ((size_t) n),
+                               varL ((size_t) n), varR ((size_t) n);
+            Random rng (6);
+            for (auto* v : { &lateL, &lateR, &varL, &varR })
+                for (auto& x : *v) x = rng.nextFloat() * 2.0f - 1.0f;
+            for (int pos = 0; pos < n; pos += 512)
+            {
+                const int len = std::min (512, n - pos);
+                m.process (l.data() + pos, r.data() + pos, lateL.data() + pos, lateR.data() + pos, varL.data() + pos,
+                           varR.data() + pos, len, 100.0f, 0.0f, 1.0f);
+            }
+            const double levelDb = 10.0 * std::log10 (energy (l, n / 10) / energy (lateL, n / 10));
+            expectWithinAbsoluteError (levelDb, 0.0, 0.5, "level");
+            // correlation with the unmodulated late reverb in 250 ms windows
+            const int win = (int) (0.25 * sr);
+            double lowest = 1.0;
+            for (int w = 0; (w + 1) * win <= n; ++w)
+            {
+                double cross = 0.0;
+                for (int i = w * win; i < (w + 1) * win; ++i) cross += (double) l[(size_t) i] * lateL[(size_t) i];
+                lowest = std::min (lowest, cross / std::sqrt (energy (l, w * win, (w + 1) * win) * energy (lateL, w * win, (w + 1) * win)));
+            }
+            logMessage ("  level " + String (levelDb, 2) + " dB, lowest correlation with the unmodulated tail " + String (lowest, 2));
+            expectLessThan (lowest, 0.5);
+        }
+
+        beginTest ("chorus keeps the level, its pitch movement stays small");
+        {
+            TailModulator m;
+            m.prepare (sr);
+            const int n = (int) (4.0 * sr);
+            std::vector<float> l ((size_t) n, 0.0f), r ((size_t) n, 0.0f), late ((size_t) n), zero ((size_t) n, 0.0f);
+            for (int i = 0; i < n; ++i) late[(size_t) i] = (float) std::sin (2.0 * MathConstants<double>::pi * 1000.0 * i / sr);
+            m.process (l.data(), r.data(), late.data(), late.data(), zero.data(), zero.data(), n, 0.0f, 100.0f, 4.0f);
+            expectWithinAbsoluteError (10.0 * std::log10 (energy (l, n / 4) / energy (late, n / 4)), 0.0, 0.2, "level");
+
+            // frequency from the spacing of rising zero crossings (interpolated)
+            auto deviation = [&] (const std::vector<float>& x) {
+                double last = -1.0, worst = 0.0;
+                for (int i = n / 4; i < n; ++i)
+                    if (x[(size_t) i - 1] < 0.0f && x[(size_t) i] >= 0.0f)
+                    {
+                        const double t = (double) (i - 1) + (double) (x[(size_t) i - 1] / (x[(size_t) i - 1] - x[(size_t) i]));
+                        if (last > 0.0) worst = std::max (worst, std::abs (sr / (t - last) / 1000.0 - 1.0));
+                        last = t;
+                    }
+                return worst;
+            };
+            const double devL = deviation (l), devR = deviation (r);
+            logMessage ("  largest pitch deviation " + String (devL * 100.0, 2) + " % / " + String (devR * 100.0, 2) + " %");
+            expectGreaterThan (devL, 0.003, "it moves");
+            expectLessThan (std::max (devL, devR), 0.03);
+            expect (l != r, "left and right move differently");
+        }
+
         beginTest ("ducker reduces the wet signal while the key is loud");
         {
             Ducker d;
@@ -548,6 +786,8 @@ public:
             expectEquals (formatRolloff (22000.0f), String ("Off"));
             expectEquals (formatDb (-24.0f, kLevelOffDb), String ("Off"));
             expectEquals (formatMs (1500.0f), String ("1.50 s"));
+            expectEquals (formatOffsetMs (-kMaxOffsetMs), String ("-5.00 s"));
+            expectEquals (formatOffsetMs (120.0f), String ("+120 ms"));
         }
     }
 };

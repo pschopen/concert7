@@ -74,7 +74,7 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Presets | the 134 Samplicity M7 captures (Halls, Plates, Rooms, Chambers, Ambience, Spaces) + your own IRs (mono, stereo or 4 channel true stereo) in the IR folder |
 | Decay | 0.2 – 30 s, starts at each preset's analysed native RT60 (optionally held on preset change) |
 | Pre-delay | 0 – 500 ms or tempo synced, applied to the late reverb |
-| Offset | −250 – +250 ms, moves the start of the whole impulse response; negative values cut its beginning (negative pre-delay, thinner or no early reflections) |
+| Offset | −5 – +5 s (finer around 0), moves the start of the whole impulse response; negative values cut its beginning (negative pre-delay, thinner or no early reflections) |
 | Levels | Early, Late and VLF (late reverb below ~120 Hz) |
 | Roll-off | separate low pass for early reflections and late reverb, 80 Hz – 22 kHz |
 | Multi-band decay | low shelf 80 Hz – 4.8 kHz and high shelf 200 Hz – 16 kHz, ×0.2 – ×4 |
@@ -83,7 +83,7 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Ducker | amount, threshold, release, sidechain input (EXTRAS tab) |
 | Post EQ | high pass 12 dB, low shelf/bell, mid bell, high shelf/bell, high cut 12 dB, interactive curve |
 | Propagation | True Stereo, No Crossfeed (L→L / R→R), Mono In |
-| Modulation | depth / rate vibrato on the wet signal (EXTRAS tab) |
+| Modulation | four modes with depth / rate (EXTRAS tab): Vibrato (pitch of the whole reverb), Chorus (pitch of the late reverb, decorrelated left / right), Drift (most natural, the default: the late reverb keeps changing its fine structure, no pitch change), Drift + Chorus; early reflections stay untouched except in Vibrato |
 | Smooth | 0 – 100 %, evens out resonances, ringing and bumps in the decay of the late reverb (EXTRAS tab) |
 | Space | hall model: volume (m³) and absorption (stone church … studio) set the decay (Eyring); distance: places a dry source 0.5 – 60 m away – direct to reverberant ratio, presence, air absorption, gap before the first reflection, optional source width and time alignment (SPACE tab) |
 | Direct | tone (HIGHS shelf, AIR absorption), WIDTH and DELAY of the dry signal, REVERB GAP of the whole reverb against it – by hand or set by the distance mode (SPACE tab, below the distance controls) |
@@ -119,6 +119,20 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
 4. **Assembly**: early part (own or from the selected pattern, with roll-off), late part shifted by the pre-delay,
    plus delay voices. The offset then moves the whole response: leading silence, or its start is cut with a 2 ms
    fade-in.
+5. **Modulation streams**: an impulse response is a frozen snapshot – the internal modulation of the M7 is not in
+   the recordings. For the Chorus and Drift modes the late reverb is assembled as a response of its own (early
+   part + late reverb = the whole response), so it can move while the early reflections stay put. Drift adds a
+   **variant** of the late reverb: every STFT frame gets new random phases (the same for all four channels, so the
+   stereo relation stays), and a 10 ms energy match keeps its envelope – same decay, same spectrum, independent
+   fine structure.
+
+**Modulation** (`TailModulator` in `src/dsp/PostProcessing.cpp`) runs on the convolver outputs. Drift turns the late
+reverb between itself and its variant, `cos θ · late + sin θ · variant` with θ following a smooth random curve
+(up to ±180° at 100 %): the energy stays the same, but the tail keeps changing – sustained notes shimmer, the stereo
+image moves, nothing wavers in pitch. Chorus delays the late reverb by 1 … 4 ms along smooth random curves,
+independently left and right (at 100 % and 0.5 Hz up to about 5 cents). Drift + Chorus uses both, the chorus at half depth.
+Vibrato is the sine vibrato on the whole reverb of 0.1.x; projects saved before the modes keep it. Drift convolves
+the late reverb twice and needs about twice the CPU; at depth 0 and in Vibrato the response is not split at all.
 
 **SPACE tab** (`src/dsp/Distance.cpp`): two optional ways to set Concert7 in terms of a real hall. Both start from
 the current sound when switched on, and while off their greyed knobs show the values that match it.
@@ -224,7 +238,10 @@ What the tests cover:
   per-band analysis, exact reproduction with neutral settings, decay scaling ×0.35 … ×3 and extension beyond the
   recording, multi-band multipliers, pre-delay, levels, delay voices, roll-off, VLF, early pattern swap,
   true stereo convolution against direct convolution for block sizes 1 … 4096, click-free IR switching while
-  audio runs, smooth (resonance and echo reduction at unchanged reverb time), EQ gains, modulator and ducker.
+  audio runs, smooth (resonance and echo reduction at unchanged reverb time), EQ gains, modulator and ducker;
+  modulation: early part + late reverb add up to the whole response, the late variant keeps envelope, spectrum and
+  channel relation but not the fine structure, every stream is convolved with its own part, drift keeps the level,
+  the chorus pitch movement stays small.
 * **Library** (real Bricasti files) – file name parsing, 134 presets in 6 categories, 32 distinct early patterns,
   quad files identical to L/R pairs, every preset loads and analyses plausibly, the decay control works on real
   presets.

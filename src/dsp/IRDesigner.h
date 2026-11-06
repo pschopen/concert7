@@ -22,6 +22,10 @@
 //     (shifted by the pre-delay) and delay voices are summed with their levels.
 //     The offset finally moves the whole response: later (leading silence) or
 //     earlier (its start is cut, with a short fade-in).
+//  5. For the modulation the late reverb can be handed over separately from the
+//     early part (so it can move on its own), together with a variant: the same
+//     late reverb with new random phases in every STFT frame - same envelope,
+//     spectrum and channel relation, but an independent fine structure.
 
 #pragma once
 
@@ -77,6 +81,8 @@ struct DesignParams
     float highFreq = 4000.0f;
     float highMult = 1.0f;
     float smooth = 0.0f;         // 0 .. 1: evens out resonances and envelope bumps of the late reverb
+    bool splitLate = false;      // modulation: the late reverb as a response of its own (BuiltIR::late)
+    bool lateVariant = false;    // modulation: plus its variant (BuiltIR::variant), needs splitLate
 
     bool operator== (const DesignParams& o) const;
     bool operator!= (const DesignParams& o) const { return ! (*this == o); }
@@ -87,7 +93,15 @@ struct BuiltIR
     double sampleRate = 0.0;
     bool trueStereo = false;
     std::array<std::vector<float>, 4> ch;
-    int length() const { return (int) ch[0].size(); }
+
+    // With DesignParams::splitLate, ch holds only the early part and late the late reverb (with pre-delay,
+    // delay voices and offset): ch + late is the whole response. variant has the same envelope and spectrum
+    // as late, but an independent fine structure. Empty when not requested.
+    std::array<std::vector<float>, 4> late, variant;
+    bool hasLate() const { return ! late[0].empty(); }
+    bool hasVariant() const { return ! variant[0].empty(); }
+
+    int length() const { return (int) std::max (ch[0].size(), late[0].size()); }
 
     // information for the user interface
     juce::String presetId;

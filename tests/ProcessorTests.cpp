@@ -159,6 +159,109 @@ public:
             expectEquals (other.getCurrentIR()->sampleRate, 44100.0, "IR at the new host rate");
         }
 
+        beginTest ("modulation: the late reverb is split off only when a mode needs it");
+        {
+            auto layout = [&] { settle (proc); auto ir = proc.getCurrentIR(); return ir == nullptr ? -1 : (int) ir->hasLate() + (int) ir->hasVariant(); };
+            setParam (proc, ParamID::modMode, (float) ModMode::Drift);
+            setParam (proc, ParamID::modDepth, 0.0f);
+            expectEquals (layout(), 0, "depth 0");
+            setParam (proc, ParamID::modDepth, 40.0f);
+            expectEquals (layout(), 2, "drift");
+            setParam (proc, ParamID::modMode, (float) ModMode::Chorus);
+            expectEquals (layout(), 1, "chorus");
+            setParam (proc, ParamID::modMode, (float) ModMode::DriftChorus);
+            expectEquals (layout(), 2, "drift + chorus");
+            setParam (proc, ParamID::modMode, (float) ModMode::Vibrato);
+            expectEquals (layout(), 0, "vibrato");
+        }
+
+        beginTest ("modulation: drift keeps the reverb level and leaves the early reflections alone");
+        {
+            setParam (proc, ParamID::mix, 100.0f);
+            auto impulseResponse = [&] {
+                settle (proc);
+                MidiBuffer midi;
+                // let the tail of everything before die away
+                AudioBuffer<float> silence (2, 512);
+                for (int pos = 0; pos < proc.getCurrentIR()->length() + 48000; pos += 512)
+                {
+                    silence.clear();
+                    proc.processBlock (silence, midi);
+                }
+                const int len = 96000;
+                AudioBuffer<float> buf (2, len);
+                buf.clear();
+                buf.setSample (0, 0, 1.0f);
+                for (int pos = 0; pos < len; pos += 512)
+                {
+                    AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, pos, std::min (512, len - pos));
+                    proc.processBlock (view, midi);
+                }
+                return buf;
+            };
+            setParam (proc, ParamID::modDepth, 0.0f);
+            const auto plain = impulseResponse();
+            setParam (proc, ParamID::modMode, (float) ModMode::Drift);
+            setParam (proc, ParamID::modDepth, 100.0f);
+            const auto moving = impulseResponse();
+            auto ir = proc.getCurrentIR();
+            expect (ir != nullptr && ir->hasVariant());
+
+            double ePlain = 0.0, eMoving = 0.0;
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < plain.getNumSamples(); ++i)
+                {
+                    ePlain += (double) plain.getSample (c, i) * plain.getSample (c, i);
+                    eMoving += (double) moving.getSample (c, i) * moving.getSample (c, i);
+                }
+            const double levelDb = 10.0 * std::log10 (eMoving / ePlain);
+            logMessage ("  level with drift " + String (levelDb, 2) + " dB");
+            expectWithinAbsoluteError (levelDb, 0.0, 1.0);
+
+            // the early reflections until the crossover to the late reverb come out unchanged
+            const int earlyEnd = (int) ((ir->onsetMs * 0.001f + ir->splitSeconds * 0.5f) * 48000.0f);
+            float maxDiff = 0.0f;
+            for (int i = 0; i < earlyEnd; ++i)
+                maxDiff = std::max (maxDiff, std::abs (moving.getSample (0, i) - plain.getSample (0, i)));
+            expectLessThan (maxDiff, 1e-4f);
+            setParam (proc, ParamID::modDepth, 0.0f);
+        }
+
+        beginTest ("modulation: projects from before the modes keep their vibrato");
+        {
+            setParam (proc, ParamID::modMode, (float) ModMode::Drift);
+            setParam (proc, ParamID::modDepth, 30.0f);
+            MemoryBlock state;
+            proc.getStateInformation (state);
+            auto xml = AudioProcessor::getXmlFromBinary (state.getData(), (int) state.getSize());
+            expect (xml != nullptr);
+            for (auto* e : xml->getChildIterator())
+                if (e->getStringAttribute ("id") == ParamID::modMode)
+                {
+                    xml->removeChildElement (e, true);
+                    break;
+                }
+            MemoryBlock old;
+            AudioProcessor::copyXmlToBinary (*xml, old);
+
+            Concert7Processor before, now;
+            before.setStateInformation (old.getData(), (int) old.getSize());
+            now.setStateInformation (state.getData(), (int) state.getSize());
+            expectEquals (roundToInt (getParam (before, ParamID::modMode)), (int) ModMode::Vibrato);
+            expectWithinAbsoluteError (getParam (before, ParamID::modDepth), 30.0f, 0.01f);
+            expectEquals (roundToInt (getParam (now, ParamID::modMode)), (int) ModMode::Drift);
+
+            // a new instance starts with the most natural mode at 0.3 Hz, the offset reaches 5 s either way
+            Concert7Processor fresh;
+            expectEquals (roundToInt (getParam (fresh, ParamID::modMode)), (int) ModMode::Drift);
+            expectEquals (fresh.getAPVTS().getParameter (ParamID::modMode)->getCurrentValueAsText(), String ("Drift (most natural)"));
+            expectWithinAbsoluteError (getParam (fresh, ParamID::modRate), 0.3f, 1e-4f);
+            const auto offsetRange = fresh.getAPVTS().getParameter (ParamID::irOffset)->getNormalisableRange();
+            expectEquals (offsetRange.start, -5000.0f);
+            expectEquals (offsetRange.end, 5000.0f);
+            setParam (proc, ParamID::modDepth, 0.0f);
+        }
+
         beginTest ("random block sizes, all parameters at extremes: finite output");
         {
             Random rng (5);

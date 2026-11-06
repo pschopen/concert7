@@ -101,9 +101,11 @@ void Concert7Processor::prepareToPlay (double sampleRate, int samplesPerBlock)
         engine.prepare (sampleRate, block);
         eq.prepare (sampleRate);
         modulator.prepare (sampleRate);
+        tailModulator.prepare (sampleRate);
         ducker.prepare (sampleRate);
         distanceRenderer.prepare (sampleRate, block);
         wet.setSize (2, block);
+        wetLate.setSize (4, block);
         dry.setSize (4, block); // 0/1 dry input, 2/3 convolver input
         dryGainSmooth.reset (sampleRate, 0.03);
         wetGainSmooth.reset (sampleRate, 0.03);
@@ -151,6 +153,7 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
     {
         // hosts should not exceed the prepared size, but some do
         wet.setSize (2, n, false, false, true);
+        wetLate.setSize (4, n, false, false, true);
         dry.setSize (4, n, false, false, true);
     }
 
@@ -210,9 +213,19 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
 
     float* wetL = wet.getWritePointer (0);
     float* wetR = wet.getWritePointer (1);
-    engine.process (sendL, sendR, wetL, wetR, n, crossfeed != Crossfeed::NoCrossfeed);
+    WetStreams streams;
+    streams.ch = { wetL, wetR, wetLate.getWritePointer (0), wetLate.getWritePointer (1),
+                   wetLate.getWritePointer (2), wetLate.getWritePointer (3) };
+    engine.process (sendL, sendR, streams, n, crossfeed != Crossfeed::NoCrossfeed);
 
-    modulator.process (wetL, wetR, n, param (ParamID::modDepth), param (ParamID::modRate));
+    // modulation: Vibrato moves the whole reverb, the other modes only the late reverb (split off in the IR)
+    const auto modMode = (ModMode) roundToInt (param (ParamID::modMode));
+    const float modDepth = param (ParamID::modDepth), modRate = param (ParamID::modRate);
+    const bool drift = modMode == ModMode::Drift || modMode == ModMode::DriftChorus;
+    const float chorus = modMode == ModMode::Chorus ? modDepth : (modMode == ModMode::DriftChorus ? 0.5f * modDepth : 0.0f);
+    tailModulator.process (wetL, wetR, streams.l (1), streams.r (1), streams.l (2), streams.r (2), n,
+                           drift ? modDepth : 0.0f, chorus, modRate);
+    modulator.process (wetL, wetR, n, modMode == ModMode::Vibrato ? modDepth : 0.0f, modRate);
 
     eq.setSettings (readEQSettings());
     eq.process (wetL, wetR, n);
@@ -405,7 +418,23 @@ DesignParams Concert7Processor::readDesignParams() const
     d.highFreq = param (ParamID::highFreq);
     d.highMult = param (ParamID::highMult);
     d.smooth = param (ParamID::smooth) * 0.01f;
+    const int layout = lateLayout();
+    d.splitLate = layout >= 1;
+    d.lateVariant = layout >= 2;
     return d;
+}
+
+int Concert7Processor::lateLayout() const
+{
+    if (param (ParamID::modDepth) <= 0.0f) return 0;
+    switch ((ModMode) roundToInt (param (ParamID::modMode)))
+    {
+        case ModMode::Chorus:      return 1;
+        case ModMode::Drift:
+        case ModMode::DriftChorus: return 2;
+        case ModMode::Vibrato:     break;
+    }
+    return 0;
 }
 
 EQSettings Concert7Processor::readEQSettings() const
@@ -662,6 +691,13 @@ void Concert7Processor::parameterChanged (const String& id, float value)
     }
     if (isIRParameter (id))
         requestRebuild();
+    // the modulation modes of the late reverb need it as a response of its own: rebuild when that changes
+    if (id == ParamID::modDepth || id == ParamID::modMode)
+    {
+        const int layout = lateLayout();
+        if (requestedLateLayout.exchange (layout) != layout)
+            requestRebuild();
+    }
 }
 
 void Concert7Processor::changeListenerCallback (ChangeBroadcaster*)
@@ -785,6 +821,8 @@ void Concert7Processor::setStateInformation (const void* data, int sizeInBytes)
         if (! xml->hasTagName (apvts.state.getType())) return;
         auto tree = ValueTree::fromXml (*xml);
         const auto id = tree.getProperty ("presetId").toString();
+        // projects from before the modulation modes keep their vibrato
+        const bool hasModMode = tree.getChildWithProperty ("id", ParamID::modMode).isValid();
         distanceReference = (float) tree.getProperty ("distanceReference", 8.0);
         pendingDistance = -1.0f;
         pendingHallVolume = -1.0f;
@@ -793,6 +831,9 @@ void Concert7Processor::setStateInformation (const void* data, int sizeInBytes)
         handbackPending = false;
         restoringState = true;
         apvts.replaceState (tree);
+        if (! hasModMode)
+            if (auto* p = apvts.getParameter (ParamID::modMode))
+                p->setValueNotifyingHost (p->convertTo0to1 ((float) ModMode::Vibrato));
         restoringState = false;
         {
             const ScopedLock sl (statusLock);

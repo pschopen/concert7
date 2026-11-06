@@ -125,6 +125,8 @@ private:
     void resetParameters();
     void buildNow();
     DesignParams readDesignParams() const;
+    int lateLayout() const;            // which streams the modulation needs: 0 none, 1 late, 2 late + variant
+    std::atomic<int> requestedLateLayout { -1 };
     EQSettings readEQSettings() const;
     float param (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
 
@@ -134,9 +136,10 @@ private:
     ConvolutionEngine engine;
     PostEQ eq;
     Modulator modulator;
+    TailModulator tailModulator;
     Ducker ducker;
     DistanceRenderer distanceRenderer;
-    juce::AudioBuffer<float> wet, dry;
+    juce::AudioBuffer<float> wet, dry, wetLate;   // wetLate: late reverb and its variant (modulation)
     juce::SmoothedValue<float> dryGainSmooth, wetGainSmooth, gainSmooth;
     std::atomic<float> irMidEnergy { 0.0f }, irMidEnergyDiagonal { 0.0f }, irOnsetMs { 0.0f };  // of the last built IR
     std::atomic<float> distanceReference { 8.0f };   // m, stored with the project

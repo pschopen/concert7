@@ -127,7 +127,7 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::predelaySync, 1 }, "Pre-Delay Sync", false));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamID::predelayNote, 1 }, "Pre-Delay Note", noteNames(), 4));
     // start of the whole impulse response, finer around 0
-    layout.add (floatParam (ParamID::irOffset, "IR Offset", NormalisableRange<float> (-250.0f, 250.0f, 0.0f, 0.5f, true), 0.0f, "ms",
+    layout.add (floatParam (ParamID::irOffset, "IR Offset", NormalisableRange<float> (-kMaxOffsetMs, kMaxOffsetMs, 0.0f, 0.4f, true), 0.0f, "ms",
                             [] (float v, int) { return formatOffsetMs (v); }));
     layout.add (floatParam (ParamID::decay, "Decay", skewedRange (0.2f, 30.0f, 3.0f), 2.0f, "s", sec));
     layout.add (floatParam (ParamID::early, "Early", NormalisableRange<float> (kLevelOffDb, 6.0f, 0.0f), 0.0f, "dB",
@@ -159,8 +159,11 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (floatParam (ParamID::highMult, "High Mult", logRange (0.2f, 4.0f), 1.0f, "x", mult));
 
     // ---- extras: modulation, smooth, ducker
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamID::modMode, 1 }, "Mod Mode",
+                                                        StringArray { "Vibrato", "Chorus", "Drift (most natural)", "Drift + Chorus" },
+                                                        (int) ModMode::Drift));
     layout.add (floatParam (ParamID::modDepth, "Mod Depth", NormalisableRange<float> (0.0f, 100.0f), 0.0f, "%", pct));
-    layout.add (floatParam (ParamID::modRate, "Mod Rate", logRange (0.05f, 4.0f), 0.5f, "Hz",
+    layout.add (floatParam (ParamID::modRate, "Mod Rate", logRange (0.05f, 4.0f), 0.3f, "Hz",
                             [] (float v, int) { return String (v, 2) + " Hz"; }));
     layout.add (floatParam (ParamID::smooth, "Smooth", NormalisableRange<float> (0.0f, 100.0f), 0.0f, "%",
                             [] (float v, int) { return v < 0.5f ? String ("Off") : String (roundToInt (v)) + " %"; }));

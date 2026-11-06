@@ -10,17 +10,20 @@ using namespace juce;
 
 TrueStereoConvolver::TrueStereoConvolver()
 {
-    for (auto& c : conv)
+    for (auto& c : sets[0])
         c = std::make_unique<Convolver>();
 }
 
 void TrueStereoConvolver::unload()
 {
-    for (auto& c : conv)
-    {
-        c->waitIdle();
-        c->reset();
-    }
+    for (auto& set : sets)
+        for (auto& c : set)
+            if (c != nullptr)
+            {
+                c->waitIdle();
+                c->reset();
+            }
+    used = {};
     ir.reset();
     loaded = false;
 }
@@ -29,41 +32,61 @@ void TrueStereoConvolver::load (std::shared_ptr<const BuiltIR> newIR, size_t hea
 {
     unload();
     trueStereo = newIR->trueStereo;
-    for (int c = 0; c < 4; ++c)
+    const std::array<const std::array<std::vector<float>, 4>*, WetStreams::kNumStreams> data {
+        &newIR->ch, &newIR->late, &newIR->variant };
+    for (size_t s = 0; s < sets.size(); ++s)
     {
-        const auto& data = newIR->ch[(size_t) c];
-        if (! data.empty())
-            conv[(size_t) c]->init (headBlock, tailBlock, data.data(), data.size());
+        used[s] = ! (*data[s])[0].empty();
+        if (! used[s]) continue;
+        for (int c = 0; c < 4; ++c)
+        {
+            const auto& d = (*data[s])[(size_t) c];
+            if (d.empty()) continue;
+            auto& conv = sets[s][(size_t) c];
+            if (conv == nullptr)
+                conv = std::make_unique<Convolver>();
+            conv->init (headBlock, tailBlock, d.data(), d.size());
+        }
     }
     // keeping a reference here guarantees the audio thread never releases the last one
     ir = std::move (newIR);
     loaded = true;
 }
 
-void TrueStereoConvolver::process (const float* inL, const float* inR, float* outL, float* outR, int n,
-                                   bool crossfeed, float* scratch)
+void TrueStereoConvolver::processSet (Set& set, const float* inL, const float* inR, float* outL, float* outR, int n,
+                                      bool crossfeed, float* scratch)
 {
-    if (! loaded)
-    {
-        FloatVectorOperations::clear (outL, n);
-        FloatVectorOperations::clear (outR, n);
-        return;
-    }
-
-    conv[0]->process (inL, outL, (size_t) n);   // L -> L
-    conv[3]->process (inR, outR, (size_t) n);   // R -> R
+    set[0]->process (inL, outL, (size_t) n);   // L -> L
+    set[3]->process (inR, outR, (size_t) n);   // R -> R
 
     if (trueStereo)
     {
         // the cross paths always run so their state stays valid when crossfeed is toggled
         float* lr = scratch;
         float* rl = scratch + n;
-        conv[1]->process (inL, lr, (size_t) n); // L -> R
-        conv[2]->process (inR, rl, (size_t) n); // R -> L
+        set[1]->process (inL, lr, (size_t) n); // L -> R
+        set[2]->process (inR, rl, (size_t) n); // R -> L
         if (crossfeed)
         {
             FloatVectorOperations::add (outL, rl, n);
             FloatVectorOperations::add (outR, lr, n);
+        }
+    }
+}
+
+void TrueStereoConvolver::process (const float* inL, const float* inR, const WetStreams& out, int n,
+                                   bool crossfeed, float* scratch)
+{
+    for (int s = 0; s < WetStreams::kNumStreams; ++s)
+    {
+        if (loaded && used[(size_t) s])
+        {
+            processSet (sets[(size_t) s], inL, inR, out.l (s), out.r (s), n, crossfeed, scratch);
+        }
+        else
+        {
+            FloatVectorOperations::clear (out.l (s), n);
+            FloatVectorOperations::clear (out.r (s), n);
         }
     }
 }
@@ -96,8 +119,8 @@ void ConvolutionEngine::prepare (double sr, int maxBlockSize)
     history.clear();
     written.store (0);
     scratch.assign ((size_t) maxBlock * 4, 0.0f);
-    xfL.assign ((size_t) maxBlock, 0.0f);
-    xfR.assign ((size_t) maxBlock, 0.0f);
+    crossfade.resize (maxBlock);
+    summed.resize (maxBlock);
     audioFeed.resize (maxBlock);
     crossfadeLength = std::max (1, (int) (kCrossfadeSeconds * sr));
 
@@ -122,7 +145,7 @@ void ConvolutionEngine::feedHistory (TrueStereoConvolver& c, int64 from, int64 t
 {
     const int size = history.getNumSamples();
     const int chunk = (int) buf.l.size();
-    auto& l = buf.l; auto& r = buf.r; auto& ol = buf.ol; auto& orr = buf.orr; auto& sc = buf.sc;
+    auto& l = buf.l; auto& r = buf.r; auto& sc = buf.sc;
     for (int64 pos = from; pos < to;)
     {
         const int n = (int) std::min<int64> (chunk, to - pos);
@@ -132,7 +155,7 @@ void ConvolutionEngine::feedHistory (TrueStereoConvolver& c, int64 from, int64 t
             l[(size_t) i] = history.getSample (0, idx);
             r[(size_t) i] = history.getSample (1, idx);
         }
-        c.process (l.data(), r.data(), ol.data(), orr.data(), n, crossfeed, sc.data());
+        c.process (l.data(), r.data(), buf.streams, n, crossfeed, sc.data());
         pos += n;
     }
 }
@@ -185,6 +208,20 @@ bool ConvolutionEngine::loadIR (std::shared_ptr<const BuiltIR> ir, const std::fu
 
 void ConvolutionEngine::process (const float* inL, const float* inR, float* outL, float* outR, int n, bool crossfeed)
 {
+    for (int off = 0; off < n; off += maxBlock)
+    {
+        const int len = std::min (maxBlock, n - off);
+        auto streams = summed.streams;
+        streams.ch[0] = outL + off;
+        streams.ch[1] = outR + off;
+        process (inL + off, inR + off, streams, len, crossfeed);
+        FloatVectorOperations::add (outL + off, streams.l (1), len);
+        FloatVectorOperations::add (outR + off, streams.r (1), len);
+    }
+}
+
+void ConvolutionEngine::process (const float* inL, const float* inR, const WetStreams& out, int n, bool crossfeed)
+{
     lastCrossfeed.store (crossfeed);
 
     // process in chunks that fit the scratch buffers
@@ -193,7 +230,7 @@ void ConvolutionEngine::process (const float* inL, const float* inR, float* outL
         for (int off = 0; off < n; off += maxBlock)
         {
             const int len = std::min (maxBlock, n - off);
-            process (inL + off, inR + off, outL + off, outR + off, len, crossfeed);
+            process (inL + off, inR + off, out + off, len, crossfeed);
         }
         return;
     }
@@ -238,17 +275,21 @@ void ConvolutionEngine::process (const float* inL, const float* inR, float* outL
     }
 
     // 3. convolve
-    active->process (inL, inR, outL, outR, n, crossfeed, scratch.data());
+    active->process (inL, inR, out, n, crossfeed, scratch.data());
 
     if (state.load() == Fading)
     {
-        pending->process (inL, inR, xfL.data(), xfR.data(), n, crossfeed, scratch.data());
-        for (int i = 0; i < n; ++i)
+        pending->process (inL, inR, crossfade.streams, n, crossfeed, scratch.data());
+        for (size_t s = 0; s < out.ch.size(); ++s)
         {
-            // linear (equal gain) fade: old and new responses are usually highly correlated
-            const float a = std::min (1.0f, (float) (crossfadePos + i) / (float) crossfadeLength);
-            outL[i] += a * (xfL[(size_t) i] - outL[i]);
-            outR[i] += a * (xfR[(size_t) i] - outR[i]);
+            float* o = out.ch[s];
+            const float* x = crossfade.streams.ch[s];
+            for (int i = 0; i < n; ++i)
+            {
+                // linear (equal gain) fade: old and new responses are usually highly correlated
+                const float a = std::min (1.0f, (float) (crossfadePos + i) / (float) crossfadeLength);
+                o[i] += a * (x[i] - o[i]);
+            }
         }
         crossfadePos += n;
         if (crossfadePos >= crossfadeLength)

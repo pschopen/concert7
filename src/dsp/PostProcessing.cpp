@@ -12,6 +12,21 @@ namespace
 {
     constexpr double kPi = MathConstants<double>::pi;
 
+    /** 4 point Hermite interpolation in a ring buffer, delay >= 1 sample (0 = newest sample). */
+    float hermiteRead (const std::vector<float>& buf, int writePos, double delay) noexcept
+    {
+        const int size = (int) buf.size();
+        const double pos = (double) writePos - delay;
+        const int i1 = (int) std::floor (pos);
+        const float t = (float) (pos - i1);
+        auto at = [&] (int i) { return buf[(size_t) ((i % size + size) % size)]; };
+        const float xm1 = at (i1 - 1), x0 = at (i1), x1 = at (i1 + 1), x2 = at (i1 + 2);
+        const float c1 = 0.5f * (x1 - xm1);
+        const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+        const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+        return ((c3 * t + c2) * t + c1) * t + x0;
+    }
+
     struct Proto { double w0, cw, sw, alpha, A; };
     Proto proto (double sr, double f, double q, double gainDb = 0.0)
     {
@@ -210,19 +225,6 @@ void Modulator::process (float* l, float* r, int n, float depthPercent, float ra
     const double maxDelay = 0.5 * kMaxDelayMs * 0.001 * sampleRate; // modulation swing in samples
     const double inc = rateHz / sampleRate;
 
-    auto read = [size] (const std::vector<float>& buf, int wp, double delay) {
-        // 4 point Hermite interpolation, delay >= 0 (0 = newest sample)
-        const double pos = (double) wp - delay;
-        int i1 = (int) std::floor (pos);
-        const float t = (float) (pos - i1);
-        auto at = [&] (int i) { return buf[(size_t) ((i % size + size) % size)]; };
-        const float xm1 = at (i1 - 1), x0 = at (i1), x1 = at (i1 + 1), x2 = at (i1 + 2);
-        const float c1 = 0.5f * (x1 - xm1);
-        const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
-        const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
-        return ((c3 * t + c2) * t + c1) * t + x0;
-    };
-
     for (int i = 0; i < n; ++i)
     {
         bufL[(size_t) writePos] = l[i];
@@ -231,11 +233,105 @@ void Modulator::process (float* l, float* r, int n, float depthPercent, float ra
         const double sL = 0.5 + 0.5 * std::sin (2.0 * kPi * phase);
         const double sR = 0.5 + 0.5 * std::cos (2.0 * kPi * phase);
         // +1 keeps the read point at least one sample behind the newest sample (needed for Hermite)
-        l[i] = read (bufL, writePos, 1.0 + d * maxDelay * 2.0 * sL);
-        r[i] = read (bufR, writePos, 1.0 + d * maxDelay * 2.0 * sR);
+        l[i] = hermiteRead (bufL, writePos, 1.0 + d * maxDelay * 2.0 * sL);
+        r[i] = hermiteRead (bufR, writePos, 1.0 + d * maxDelay * 2.0 * sR);
         writePos = (writePos + 1) % size;
         phase += inc;
         if (phase >= 1.0) phase -= 1.0;
+    }
+}
+
+//==============================================================================
+void RandomLfo::reset (int64 seed)
+{
+    rng.setSeed (seed);
+    from = 0.0f;
+    to = rng.nextFloat() * 2.0f - 1.0f;
+    pos = 0.0;
+}
+
+float RandomLfo::next (double increment) noexcept
+{
+    pos += increment;
+    if (pos >= 1.0)
+    {
+        pos -= std::floor (pos);
+        from = to;
+        to = rng.nextFloat() * 2.0f - 1.0f;
+    }
+    const float t = (float) pos;
+    return from + (to - from) * t * t * (3.0f - 2.0f * t);
+}
+
+//==============================================================================
+void TailModulator::prepare (double sr)
+{
+    sampleRate = sr;
+    const int size = (int) (kChorusMaxDelayMs * 0.001 * sr) + 8;
+    bufL.assign ((size_t) size, 0.0f);
+    bufR.assign ((size_t) size, 0.0f);
+    driftDepth.reset (sr, 0.3);
+    chorusDepth.reset (sr, 0.2);
+    chorusMix.reset (sr, 0.05);
+    driftDepth.setCurrentAndTargetValue (0.0f);
+    chorusDepth.setCurrentAndTargetValue (0.0f);
+    chorusMix.setCurrentAndTargetValue (0.0f);
+    reset();
+}
+
+void TailModulator::reset()
+{
+    // fixed seeds: a bounce sounds the same every time
+    drift.reset (0x0d21f7);
+    chorusL.reset (0x0c405);
+    chorusR.reset (0x0c406);
+    std::fill (bufL.begin(), bufL.end(), 0.0f);
+    std::fill (bufR.begin(), bufR.end(), 0.0f);
+    writePos = 0;
+}
+
+void TailModulator::process (float* l, float* r, const float* lateL, const float* lateR, const float* varL,
+                             const float* varR, int n, float driftPercent, float chorusPercent, float rateHz) noexcept
+{
+    driftDepth.setTargetValue (jlimit (0.0f, 1.0f, driftPercent * 0.01f));
+    chorusDepth.setTargetValue (jlimit (0.0f, 1.0f, chorusPercent * 0.01f));
+    chorusMix.setTargetValue (chorusPercent > 0.0f ? 1.0f : 0.0f);
+
+    const bool driftOn = driftDepth.isSmoothing() || driftDepth.getTargetValue() > 0.0f;
+    const bool chorusOn = chorusMix.isSmoothing() || chorusMix.getTargetValue() > 0.0f;
+    const int size = (int) bufL.size();
+    const double inc = rateHz / sampleRate;
+    const double swing = kChorusMaxDelayMs * 0.001 * sampleRate;
+
+    for (int i = 0; i < n; ++i)
+    {
+        float tl = lateL[i], tr = lateR[i];
+        if (driftOn)
+        {
+            // rotate between the late reverb and its variant: up to +-180 degrees at 100 %
+            const float angle = MathConstants<float>::pi * driftDepth.getNextValue() * drift.next (inc);
+            const float c = std::cos (angle), s = std::sin (angle);
+            tl = c * tl + s * varL[i];
+            tr = c * tr + s * varR[i];
+        }
+
+        // the delay line always runs so the chorus can fade in without a jump
+        bufL[(size_t) writePos] = tl;
+        bufR[(size_t) writePos] = tr;
+        if (chorusOn)
+        {
+            const double d = chorusDepth.getNextValue() * swing;
+            const float mix = chorusMix.getNextValue();
+            // +1 keeps the read point at least one sample behind the newest sample (needed for Hermite)
+            const float ml = hermiteRead (bufL, writePos, 1.0 + d * (0.5 + 0.5 * chorusL.next (inc)));
+            const float mr = hermiteRead (bufR, writePos, 1.0 + d * (0.5 + 0.5 * chorusR.next (inc)));
+            tl += mix * (ml - tl);
+            tr += mix * (mr - tr);
+        }
+        writePos = (writePos + 1) % size;
+
+        l[i] += tl;
+        r[i] += tr;
     }
 }
 

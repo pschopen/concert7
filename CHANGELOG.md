@@ -2,7 +2,16 @@
 
 ## Unreleased
 
-- New OFFSET control in the REVERB tab (−250 – +250 ms, frame now called TIMING / ROUTING): moves the start of the
+- Modulation modes in the EXTRAS tab. An impulse response is a frozen snapshot, so the movement of the M7's own
+  reverb is not in the recordings; the new modes add it back to the late reverb and leave the early reflections
+  alone
+  - Drift (most natural, the default; rate 0.3 Hz): the late reverb keeps changing its fine structure – sustained notes shimmer and the stereo
+    image moves, but nothing wavers in pitch. Same decay and spectrum; needs about twice the CPU
+  - Chorus: slight pitch movement of the late reverb along random curves, different left and right
+  - Drift + Chorus: both, like the tail of an algorithmic hall
+  - Vibrato: the previous modulation (pitch of the whole reverb). Projects saved with an earlier version keep it
+  - At depth 0 the reverb is exactly as before; switching a mode or leaving depth 0 rebuilds the impulse response
+- New OFFSET control in the REVERB tab (−5 – +5 s, finer around 0, frame now called TIMING / ROUTING): moves the start of the
   whole impulse response. Negative values cut its beginning with a short fade-in – a negative pre-delay that thins
   out or removes the early reflections and brings the tail in sooner. Like Decay it rebuilds the impulse response
 - New Smooth control (0 – 100 %): evens out resonances, ringing and bumps in the decay of the late reverb.

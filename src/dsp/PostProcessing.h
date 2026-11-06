@@ -93,6 +93,43 @@ private:
     juce::SmoothedValue<float> depth;
 };
 
+/** Smooth random curve in -1 .. 1: a new random target every period, eased (smoothstep) in between. */
+class RandomLfo
+{
+public:
+    void reset (juce::int64 seed);
+    float next (double increment) noexcept;  // increment = frequency / sample rate
+
+private:
+    juce::Random rng;
+    float from = 0.0f, to = 0.0f;
+    double pos = 0.0;
+};
+
+/**
+    Movement of the late reverb; the early reflections stay as they are. Adds the result to the main output.
+    Drift turns the late reverb slowly between its two versions with independent fine structure
+    (cos / sin weights keep the energy): the tail changes all the time, the pitch does not.
+    Chorus varies the delay of the late reverb along random curves, decorrelated between the channels.
+*/
+class TailModulator
+{
+public:
+    void prepare (double sampleRate);
+    void reset();
+    void process (float* l, float* r, const float* lateL, const float* lateR, const float* varL, const float* varR,
+                  int n, float driftPercent, float chorusPercent, float rateHz) noexcept;
+
+    static constexpr double kChorusMaxDelayMs = 4.0;  // delay swing at 100 %
+
+private:
+    double sampleRate = 44100.0;
+    RandomLfo drift, chorusL, chorusR;
+    juce::SmoothedValue<float> driftDepth, chorusDepth, chorusMix;
+    std::vector<float> bufL, bufR;
+    int writePos = 0;
+};
+
 /** Reduces the wet signal while the key signal (input or sidechain) is above the threshold. */
 class Ducker
 {

@@ -31,7 +31,7 @@ namespace
         "Early reflections, late reverb, delay, start of the impulse response and stereo propagation",
         "Decay time of the lows and highs, separately",
         "Equalizer for the reverb signal (the dry signal is not affected)",
-        "Modulation, Smooth and ducking",
+        "Movement in the reverb (modulation), Smooth and ducking",
         "Set the reverb by hall size, place a dry source nearer or further away, "
         "and the tone, width and timing of the dry signal"
     };
@@ -60,7 +60,7 @@ namespace
                             "Turn it down if the reverb muddies the low end." },
             { ParamID::predelaySync, "Sets the pre-delay as a note value of the host tempo." },
             { ParamID::predelayNote, "Note value for the pre-delay (only with SYNC)." },
-            { ParamID::irOffset, "Moves the start of the whole impulse response. Positive: the reverb starts later. "
+            { ParamID::irOffset, "Moves the start of the whole impulse response, up to 5 s either way. Positive: the reverb starts later. "
                                  "Negative: its beginning is cut - a negative pre-delay that thins out or removes "
                                  "the early reflections and lets the tail come in sooner." },
             { ParamID::delayTime, "Spacing of the echoes. The delay adds three repeats of the reverb - a rhythmic reverb tail." },
@@ -94,7 +94,13 @@ namespace
             { ParamID::eqLpOn, "Low-pass - removes harsh highs from the reverb." },
             { ParamID::eqLpFreq, "Cut-off frequency of the low-pass." },
             // extras
-            { ParamID::modDepth, "Slight pitch movement in the reverb: livelier, less metallic. 0 = off." },
+            { ParamID::modMode, "Kind of movement. VIBRATO: the pitch of the whole reverb wavers. "
+                                "CHORUS: only the late reverb wavers, slightly and differently left and right. "
+                                "DRIFT (most natural): the late reverb keeps changing its fine structure - alive, but no pitch change. "
+                                "DRIFT + CHORUS: both, like the tail of an algorithmic hall. "
+                                "Early reflections stay untouched except in VIBRATO. "
+                                "DRIFT needs about twice the CPU." },
+            { ParamID::modDepth, "Amount of movement in the reverb: livelier, less static. 0 = off." },
             { ParamID::modRate, "Speed of the modulation." },
             { ParamID::smooth, "Evens out ringing frequencies and bumps in the tail. "
                                "Helps when a preset rings or flutters at long decay times." },
@@ -279,6 +285,9 @@ MainPanel::MainPanel (Concert7Processor& p)
 
     // extras page
     auto& ext = pages[3];
+    modMode = std::make_unique<ParamCombo> (state, ParamID::modMode);
+    modMode->setTooltip (tooltipFor (ParamID::modMode));
+    ext.addAndMakeVisible (*modMode);
     addKnob (knobs, ext, ParamID::modDepth, "DEPTH");
     addKnob (knobs, ext, ParamID::modRate, "RATE");
     addKnob (knobs, ext, ParamID::duckAmount, "AMOUNT");
@@ -888,8 +897,9 @@ void MainPanel::resized()
 
     // extras page
     auto& ext = pages[3];
-    small (ext, ParamID::modDepth, { 24, 34, 100, 130 });
-    small (ext, ParamID::modRate, { 132, 34, 100, 130 });
+    modMode->setBounds (24, 30, 208, 24);
+    small (ext, ParamID::modDepth, { 24, 62, 100, 116 });
+    small (ext, ParamID::modRate, { 132, 62, 100, 116 });
     small (ext, ParamID::duckAmount, { 270, 34, 100, 130 });
     small (ext, ParamID::duckThreshold, { 372, 34, 100, 130 });
     small (ext, ParamID::duckRelease, { 474, 34, 100, 130 });

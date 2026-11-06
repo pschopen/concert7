@@ -62,7 +62,7 @@ private:
 
     // reverb page
     std::unique_ptr<ParamToggle> predelaySync, delaySync, duckSidechain, eqOn, eqHpOn, eqLpOn;
-    std::unique_ptr<ParamCombo> predelayNote, delayNote, crossfeed, eqLowType, eqHighType;
+    std::unique_ptr<ParamCombo> predelayNote, delayNote, crossfeed, eqLowType, eqHighType, modMode;
     juce::Label crossfeedLabel, predelayNoteLabel, delayNoteLabel;
 
     // decay + eq pages
