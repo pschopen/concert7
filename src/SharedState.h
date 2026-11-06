@@ -7,6 +7,7 @@
 #include <juce_events/juce_events.h>
 #include "dsp/IRLibrary.h"
 #include "Parameters.h"
+#include "UserPresets.h"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -100,6 +101,8 @@ public:
     void setUIScale (float scale);
 
     IRInstaller& getInstaller() { return installer; }
+    /** User presets, favourites and tags (message thread). */
+    UserPresetLibrary& getUserPresets() { return *userPresets; }
     /** Where archives dropped into the plugin are extracted to. */
     static juce::File getDefaultInstallFolder();
 
@@ -116,5 +119,6 @@ private:
     mutable juce::CriticalSection libraryLock;
     IRLibrary library;
     IRInstaller installer;
+    std::unique_ptr<UserPresetLibrary> userPresets;
 };
 } // namespace concert7

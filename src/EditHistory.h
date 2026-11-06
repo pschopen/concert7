@@ -53,7 +53,7 @@ private:
     struct Snapshot
     {
         std::vector<float> values;   // every parameter, 0..1
-        juce::String presetId;
+        juce::String presetId, userPreset;
         float distanceReference = 0.0f;
     };
     struct Change { int index; float before, after; };
@@ -63,7 +63,7 @@ private:
     void open (const juce::String& name);
     void touch (int index);
     void close();
-    void apply (const std::vector<Change>& changes, bool forward, const juce::String& presetId, float distanceReference);
+    void apply (const std::vector<Change>& changes, bool forward, const Snapshot& identity);
 
     void parameterValueChanged (int, float) override {}
     void parameterGestureChanged (int index, bool starting) override;

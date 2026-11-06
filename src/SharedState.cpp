@@ -174,6 +174,8 @@ SharedState::SharedState()
     installer.onFinished = [this] (bool ok) {
         if (ok) setIRFolder (installer.getDestination());
     };
+    userPresets = std::make_unique<UserPresetLibrary> (*settings);
+    userPresets->rescan();
 }
 
 SharedState::~SharedState()

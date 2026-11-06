@@ -166,23 +166,26 @@ MainPanel::MainPanel (Concert7Processor& p)
 
     // ---- faceplate
     display.onClick = [this] {
-        if (processor.getShared().hasLibrary()) showPresetMenu ({}, &display);
+        if (processor.getShared().hasLibrary()) showBrowser (! browser.isVisible());
         else showWelcome (true);
     };
     display.setTooltip ("Shows the preset, the value of the last control you touched and the decay envelope. "
-                        "Click to choose a preset.");
+                        "Click to open the preset browser.");
     addAndMakeVisible (display);
     for (auto* b : { &prevButton, &nextButton, &browseButton })
     {
         b->getProperties().set ("fontHeight", 12.0f);
         addAndMakeVisible (b);
     }
-    prevButton.onClick = [this] { processor.selectPresetByOffset (-1); };
-    nextButton.onClick = [this] { processor.selectPresetByOffset (1); };
-    browseButton.onClick = [this] { showPresetMenu ({}, &browseButton); };
-    prevButton.setTooltip ("Previous preset");
-    nextButton.setTooltip ("Next preset");
-    browseButton.setTooltip ("Opens the list of all presets, sorted by category");
+    // < > step through the browser's list as it is filtered (all presets at first)
+    prevButton.onClick = [this] { browser.step (-1); };
+    nextButton.onClick = [this] { browser.step (1); };
+    browseButton.onClick = [this] { showBrowser (! browser.isVisible()); };
+    browser.onClose = [this] { showBrowser (false); };
+    addChildComponent (browser);
+    prevButton.setTooltip ("Previous preset (of the browser's list as it is filtered)");
+    nextButton.setTooltip ("Next preset (of the browser's list as it is filtered)");
+    browseButton.setTooltip ("Opens the preset browser: library presets and your own, search, favourites, tags, saving");
 
     // ---- main controls
     addKnob (knobs, *this, ParamID::predelay, "PRE-DELAY");
@@ -475,52 +478,29 @@ void MainPanel::rebuildCategoryButtons()
         b->getProperties().set ("led", true);
         b->getProperties().set ("fontHeight", 10.5f);
         b->setTooltip (categoryTooltip (c));
-        b->onClick = [this, c, ptr = b.get()] { showPresetMenu (c, ptr); };
+        b->onClick = [this, c] { showBrowser (true, c); };
         addAndMakeVisible (*b);
         categoryButtons.push_back (std::move (b));
     }
     resized();
 }
 
-void MainPanel::showPresetMenu (const String& onlyCategory, Component* target)
+void MainPanel::showBrowser (bool show, const String& category)
 {
-    PopupMenu menu;
-    const auto current = processor.getPresetId();
-    std::map<String, PopupMenu> sub;
-    StringArray order;
-    processor.getShared().withLibrary ([&] (const IRLibrary& lib) {
-        const auto& presets = lib.getPresets();
-        for (size_t i = 0; i < presets.size(); ++i)
-        {
-            const auto& p = presets[i];
-            if (onlyCategory.isNotEmpty() && p.category != onlyCategory) continue;
-            order.addIfNotAlreadyThere (p.category);
-            sub[p.category].addItem ((int) i + 1, p.displayNumber() + "  " + p.name, true, p.id == current);
-        }
-    });
-    if (order.isEmpty())
+    if (show && ! processor.getShared().hasLibrary() && processor.getShared().getUserPresets().getUserPresets().empty())
     {
-        menu.addItem (-1, "No impulse responses - open setup");
+        showWelcome (true);
+        return;
     }
-    else if (onlyCategory.isNotEmpty())
+    browser.setCategory (category);
+    if (show == browser.isVisible()) return;
+    browser.setVisible (show);
+    browseButton.setToggleState (show, dontSendNotification);
+    if (show)
     {
-        menu.addSectionHeader (onlyCategory.toUpperCase());
-        menu = sub[onlyCategory];
+        browser.toFront (false);
+        browser.opened();
     }
-    else
-    {
-        for (auto& c : order)
-            menu.addSubMenu (c, sub[c], true, nullptr, current.startsWith (c + "/"));
-    }
-
-    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (target).withMinimumWidth (220),
-                        [this, safe = SafePointer<MainPanel> (this)] (int result) {
-                            if (safe == nullptr) return;
-                            if (result == -1) { showWelcome (true); return; }
-                            IRPreset p;
-                            if (result > 0 && processor.getShared().getPresetAt (result - 1, p))
-                                processor.selectPreset (p.id, true);
-                        });
 }
 
 void MainPanel::showSetupMenu()
@@ -601,7 +581,9 @@ void MainPanel::showWelcome (bool show)
     else if (! show)
     {
         welcome.reset();
+        browser.refresh(); // the library may have changed
     }
+    if (show) showBrowser (false);
 }
 
 void MainPanel::showTab (int index)
@@ -901,6 +883,7 @@ void MainPanel::paint (Graphics& g)
 
 void MainPanel::resized()
 {
+    browser.setBounds (0, kFaceHeight, kWidth, kHeight - kFaceHeight);
     // faceplate
     display.setBounds (270, 20, 470, 132);
     const int n = (int) categoryButtons.size();

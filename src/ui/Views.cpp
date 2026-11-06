@@ -66,6 +66,12 @@ void PresetDisplay::paint (Graphics& g)
     {
         line1 = IRLibrary::shortCategoryName (status.category) + " " + status.number;
         line2 = status.presetName.toUpperCase();
+        if (status.userPresetName.isNotEmpty())
+        {
+            // a user preset: its name, the impulse response it uses above
+            line1 = "USER  " + line1;
+            line2 = status.userPresetName.toUpperCase() + (status.userPresetModified ? "*" : "");
+        }
         if (status.message.isNotEmpty())
             line3 = status.message.toUpperCase();
         else if (status.loading && ! status.hasIR)

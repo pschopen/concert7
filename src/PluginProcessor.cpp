@@ -760,6 +760,7 @@ void Concert7Processor::selectPreset (const String& id, bool userAction)
     {
         resetParameters();
         userPresetChange = true;
+        setUserPreset ({}, {}, {}, 0);
     }
     requestRebuild();
     sendChangeMessage();
@@ -778,8 +779,14 @@ bool Concert7Processor::hasPendingHandover() const
 }
 
 void Concert7Processor::restoreValues (const std::vector<std::pair<RangedAudioParameter*, float>>& values,
-                                       const String& id, float reference)
+                                       const String& id, float reference, const String& userKey)
 {
+    if (userKey != getUserPresetKey())
+    {
+        const auto* entry = shared->getUserPresets().find (userKey);
+        setUserPreset (userKey, entry != nullptr ? entry->name : String(),
+                       entry != nullptr ? shared->getUserPresets().load (userKey) : ValueTree(), 0);
+    }
     pendingDistance = -1.0f;
     pendingHallVolume = -1.0f;
     pendingHallAbsorption = -1.0f;
@@ -895,7 +902,95 @@ Concert7Processor::Status Concert7Processor::getStatus() const
     const ScopedLock sl (statusLock);
     auto s = status;
     s.loading = s.loading || rebuildRequested.load() || building.load();
+    if (notice.isNotEmpty() && Time::getMillisecondCounter() < noticeUntil && s.message.isEmpty())
+        s.message = notice;
+    s.userPresetName = userPresetName;
+    if (userPresetName.isNotEmpty() && ! userPresetValues.empty())
+    {
+        s.userPresetModified = presetId != userPresetIR;
+        const auto& params = getParameters();
+        for (size_t i = 0; i < userPresetValues.size() && i < (size_t) params.size() && ! s.userPresetModified; ++i)
+            if (! std::isnan (userPresetValues[i]) && std::abs (params[(int) i]->getValue() - userPresetValues[i]) > 1.0e-5f)
+                s.userPresetModified = true;
+    }
     return s;
+}
+
+//==============================================================================
+void Concert7Processor::setUserPreset (const String& key, const String& name, const ValueTree& presetState,
+                                       GroupMask notCompared)
+{
+    std::vector<float> values;
+    if (presetState.isValid())
+        for (auto* prm : getParameters())
+        {
+            auto* rp = dynamic_cast<RangedAudioParameter*> (prm);
+            const auto child = rp != nullptr ? presetState.getChildWithProperty ("id", rp->paramID) : ValueTree();
+            if (rp == nullptr || (notCompared & groupBit (groupOf (rp->paramID))) != 0)
+                values.push_back (std::numeric_limits<float>::quiet_NaN());
+            else
+                values.push_back (child.isValid() ? rp->convertTo0to1 ((float) child.getProperty ("value")) : rp->getDefaultValue());
+        }
+    const ScopedLock sl (statusLock);
+    userPresetKey = key;
+    userPresetName = key.isNotEmpty() ? name : String();
+    userPresetIR = presetState.getProperty ("presetId").toString();
+    userPresetValues = std::move (values);
+}
+
+String Concert7Processor::getUserPresetKey() const
+{
+    const ScopedLock sl (statusLock);
+    return userPresetKey;
+}
+
+void Concert7Processor::userPresetRenamed (const String& oldKey, const String& newKey)
+{
+    if (getUserPresetKey() != oldKey) return;
+    if (newKey.isEmpty())
+    {
+        setUserPreset ({}, {}, {}, 0);
+        return;
+    }
+    const ScopedLock sl (statusLock);
+    userPresetKey = newKey;
+    if (auto* e = shared->getUserPresets().find (newKey))
+        userPresetName = e->name;
+}
+
+bool Concert7Processor::loadUserPreset (const String& key)
+{
+    auto& presets = shared->getUserPresets();
+    const auto tree = presets.load (key);
+    const auto* entry = presets.find (key);
+    if (! tree.isValid() || entry == nullptr) return false;
+
+    const auto irId = tree.getProperty ("presetId").toString();
+    const bool missing = irId.isNotEmpty() && shared->indexOfPreset (irId) < 0;
+    const auto kept = shared->getKeptGroups();
+    history->beginAction (entry->name);
+    applyStateTree (tree, kept);
+    setUserPreset (key, entry->name, tree, kept);
+    if (missing)
+    {
+        const ScopedLock sl (statusLock);
+        notice = "IR not found: " + irId.fromLastOccurrenceOf ("/", false, false);
+        noticeUntil = Time::getMillisecondCounter() + 5000;
+    }
+    history->endAction();
+    sendChangeMessage();
+    return true;
+}
+
+String Concert7Processor::saveUserPreset (const String& name, const StringArray& tags, const String& notes, String& error)
+{
+    auto tree = createStateTree();
+    tree.removeProperty ("userPreset", nullptr);
+    tree.removeProperty ("userPresetName", nullptr);
+    const auto key = shared->getUserPresets().save (name, tags, notes, tree, error);
+    if (const auto* entry = shared->getUserPresets().find (key))
+        setUserPreset (key, entry->name, tree, 0);
+    return key;
 }
 
 //==============================================================================
@@ -930,6 +1025,14 @@ ValueTree Concert7Processor::createStateTree()
     state.setProperty ("presetId", getPresetId(), nullptr);
     state.setProperty ("version", CONCERT7_VERSION, nullptr);
     state.setProperty ("distanceReference", distanceReference.load(), nullptr);
+    {
+        const ScopedLock sl (statusLock);
+        if (userPresetKey.isNotEmpty())
+        {
+            state.setProperty ("userPreset", userPresetKey, nullptr);
+            state.setProperty ("userPresetName", userPresetName, nullptr);
+        }
+    }
     return state;
 }
 
@@ -945,6 +1048,13 @@ void Concert7Processor::applyStateTree (const ValueTree& tree, GroupMask keep)
         pendingNativeDecay = -1.0f; // a build that ran before the restore must not override it
     }
     userPresetChange = false; // keep the stored decay
+    // the user preset it was made from (shown with its name, and marked when changed)
+    const auto userKey = tree.getProperty ("userPreset").toString();
+    const auto userName = tree.getProperty ("userPresetName").toString();
+    if (MessageManager::existsAndIsCurrentThread() && userKey.isNotEmpty())
+        setUserPreset (userKey, userName, shared->getUserPresets().load (userKey), 0);
+    else
+        setUserPreset (userKey, userName, {}, 0);
     requestRebuild();
     sendChangeMessage();
 }

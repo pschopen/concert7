@@ -11,21 +11,21 @@ using namespace juce;
 class EditHistory::Step : public UndoableAction
 {
 public:
-    Step (EditHistory& h, std::vector<Change> c, String presetBefore, String presetAfter, float refBefore, float refAfter)
-        : history (h), changes (std::move (c)), idBefore (std::move (presetBefore)), idAfter (std::move (presetAfter)),
-          distanceBefore (refBefore), distanceAfter (refAfter) {}
+    // the identities are snapshots without values: preset, user preset, distance reference
+    Step (EditHistory& h, std::vector<Change> c, Snapshot before, Snapshot after)
+        : history (h), changes (std::move (c)), identityBefore (std::move (before)), identityAfter (std::move (after)) {}
 
     bool perform() override
     {
         // the first time the edit has already happened
         if (std::exchange (first, false)) return true;
-        history.apply (changes, true, idAfter, distanceAfter);
+        history.apply (changes, true, identityAfter);
         return true;
     }
 
     bool undo() override
     {
-        history.apply (changes, false, idBefore, distanceBefore);
+        history.apply (changes, false, identityBefore);
         return true;
     }
 
@@ -34,8 +34,7 @@ public:
 private:
     EditHistory& history;
     std::vector<Change> changes;
-    String idBefore, idAfter;
-    float distanceBefore, distanceAfter;
+    Snapshot identityBefore, identityAfter;
     bool first = true;
 };
 
@@ -79,6 +78,7 @@ EditHistory::Snapshot EditHistory::take() const
     for (auto* rp : params)
         s.values.push_back (rp->getValue());
     s.presetId = processor.getPresetId();
+    s.userPreset = processor.getUserPresetKey();
     s.distanceReference = processor.getDistanceReference();
     return s;
 }
@@ -169,13 +169,13 @@ void EditHistory::close()
     for (size_t i = 0; i < params.size(); ++i)
         if ((wholeState || touched[i]) && before.values[i] != after.values[i])
             changes.push_back ({ (int) i, before.values[i], after.values[i] });
-    const bool presetChanged = before.presetId != after.presetId;
-    const bool referenceChanged = before.distanceReference != after.distanceReference;
-    if (changes.empty() && ! presetChanged && ! referenceChanged) return;
+    const bool identityChanged = before.presetId != after.presetId || before.userPreset != after.userPreset
+                                 || before.distanceReference != after.distanceReference;
+    if (changes.empty() && ! identityChanged) return;
 
+    auto identity = [] (const Snapshot& s) { auto i = s; i.values.clear(); return i; };
     manager().beginNewTransaction (stepName);
-    manager().perform (new Step (*this, std::move (changes), before.presetId, after.presetId,
-                               before.distanceReference, after.distanceReference));
+    manager().perform (new Step (*this, std::move (changes), identity (before), identity (after)));
 }
 
 void EditHistory::flush()
@@ -183,13 +183,13 @@ void EditHistory::flush()
     close();
 }
 
-void EditHistory::apply (const std::vector<Change>& changes, bool forward, const String& presetId, float distanceReference)
+void EditHistory::apply (const std::vector<Change>& changes, bool forward, const Snapshot& identity)
 {
     std::vector<std::pair<RangedAudioParameter*, float>> values;
     for (auto& c : changes)
         values.push_back ({ params[(size_t) c.index], forward ? c.after : c.before });
     const ScopedValueSetter<bool> busy (applying, true);
-    processor.restoreValues (values, presetId, distanceReference);
+    processor.restoreValues (values, identity.presetId, identity.distanceReference, identity.userPreset);
 }
 
 bool EditHistory::canUndo()

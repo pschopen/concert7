@@ -6,6 +6,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
 #include "ui/Logo.h"
+#include "ui/PresetBrowser.h"
 #include "ui/Theme.h"
 #include "ui/Views.h"
 #include "ui/Widgets.h"
@@ -27,15 +28,17 @@ public:
 
     void showWelcome (bool show);
     void showTab (int index);
+    /** The preset browser over the controls; a category shows only that category. */
+    void showBrowser (bool show, const juce::String& category = {});
     int getCurrentTab() const { return currentTab; }
     WelcomeOverlay* getWelcome() { return welcome.get(); }
+    PresetBrowser& getBrowser() { return browser; }
     std::function<void (float)> onScaleChange;
 
 private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void rebuildCategoryButtons();
-    void showPresetMenu (const juce::String& onlyCategory, juce::Component* target);
     void showSetupMenu();
     void touch (Knob& k);
     void editNextKnob (Knob& from, bool backwards);
@@ -81,6 +84,7 @@ private:
     bool hallAuto = false;  // DECAY follows the hall model
 
     std::unique_ptr<WelcomeOverlay> welcome;
+    PresetBrowser browser { processor };
     std::unique_ptr<juce::FileChooser> chooser;
 
     Knob* lastTouched = nullptr;

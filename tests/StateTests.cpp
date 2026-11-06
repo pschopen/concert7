@@ -5,7 +5,7 @@
 
 #include "TestHelpers.h"
 #include "PluginProcessor.h"
-#include "ui/Widgets.h"
+#include "ui/PresetBrowser.h"
 
 namespace concert7::test
 {
@@ -162,6 +162,7 @@ public:
         }
 
         runHistoryTests();
+        runUserPresetTests();
     }
 
     /** What a control does: a value set as a gesture. */
@@ -283,6 +284,131 @@ public:
             proc.selectABSlot (0);
             expectWithinAbsoluteError (get (proc, ParamID::mix), 70.0f, 0.01f);
         }
+    }
+
+    void runUserPresetTests()
+    {
+        Concert7Processor proc;
+        auto& users = proc.getShared().getUserPresets();
+        UserPresetLibrary::folderOverride().deleteRecursively();
+        users.rescan();
+        String error;
+
+        beginTest ("user presets: saving writes the whole sound, loading brings it back");
+        set (proc, ParamID::mix, 45.0f);
+        set (proc, ParamID::eqMidGain, -2.0f);
+        set (proc, ParamID::decay, 3.3f);
+        const auto key = proc.saveUserPreset ("My Hall", { "Vocals", " dark ", "vocals" }, "for the choir", error);
+        expect (key.isNotEmpty(), error);
+        expect (UserPresetLibrary::folderOverride().getChildFile ("My Hall.c7preset").existsAsFile());
+        const auto* entry = users.find (key);
+        expect (entry != nullptr);
+        if (entry != nullptr)
+        {
+            expectEquals (entry->name, String ("My Hall"));
+            expectEquals (entry->tags.joinIntoString (","), String ("vocals,dark"));
+            expectEquals (entry->notes, String ("for the choir"));
+            expect (entry->matches ("choir hall") && ! entry->matches ("plate"));
+        }
+        expectEquals (proc.getStatus().userPresetName, String ("My Hall"));
+        expect (! proc.getStatus().userPresetModified);
+        set (proc, ParamID::mix, 46.0f);
+        expect (proc.getStatus().userPresetModified, "a change is marked");
+
+        proc.selectPreset (proc.getPresetId(), true);
+        expect (proc.getStatus().userPresetName.isEmpty(), "a library preset leaves the user preset");
+        expectWithinAbsoluteError (get (proc, ParamID::mix), 30.0f, 0.01f);
+        expect (proc.loadUserPreset (key));
+        expectWithinAbsoluteError (get (proc, ParamID::mix), 45.0f, 0.01f);
+        expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), -2.0f, 0.01f);
+        expectWithinAbsoluteError (get (proc, ParamID::decay), 3.3f, 0.01f);
+        expect (! proc.getStatus().userPresetModified);
+
+        beginTest ("user presets: loading keeps the kept groups and is one undo step");
+        {
+            auto& h = proc.getHistory();
+            h.flush();
+            proc.selectPreset (proc.getPresetId(), true);
+            h.flush();
+            proc.getShared().setKeptGroups (groupBit (ParamGroup::EQ));
+            set (proc, ParamID::eqMidGain, 5.0f);
+            proc.loadUserPreset (key);
+            expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), 5.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 45.0f, 0.01f);
+            expect (! proc.getStatus().userPresetModified, "a kept group is no change");
+            proc.getShared().setKeptGroups (0);
+            h.flush();
+            h.undo();
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 30.0f, 0.01f);
+            expect (proc.getStatus().userPresetName.isEmpty());
+            h.redo();
+            expectEquals (proc.getStatus().userPresetName, String ("My Hall"));
+        }
+
+        beginTest ("user presets: the project remembers the user preset");
+        {
+            MemoryBlock block;
+            proc.getStateInformation (block);
+            Concert7Processor restored;
+            restored.setStateInformation (block.getData(), (int) block.getSize());
+            expectEquals (restored.getStatus().userPresetName, String ("My Hall"));
+            expectEquals (restored.getUserPresetKey(), key);
+        }
+
+        beginTest ("user presets: rename, tags and favourites of user and library presets");
+        {
+            users.setFavourite (key, true);
+            const auto renamed = users.edit (key, "Choir Hall", { "choir" }, "renamed", error);
+            expect (renamed.isNotEmpty(), error);
+            proc.userPresetRenamed (key, renamed);
+            expectEquals (proc.getStatus().userPresetName, String ("Choir Hall"));
+            expect (! UserPresetLibrary::folderOverride().getChildFile ("My Hall.c7preset").exists());
+            expect (users.isFavourite (renamed) && ! users.isFavourite (key), "the favourite moves along");
+            proc.saveUserPreset ("Other", {}, {}, error);
+            expect (users.edit (renamed, "Other", {}, {}, error).isEmpty(), "no rename onto another preset");
+
+            users.setLibraryTags ("Halls/01 Large Hall", { "Orchestra", "big" });
+            expectEquals (users.getLibraryTags ("Halls/01 Large Hall").joinIntoString (","), String ("orchestra,big"));
+            users.setLibraryTags ("Halls/01 Large Hall", {});
+            expect (users.getLibraryTags ("Halls/01 Large Hall").isEmpty());
+            expect (users.save ("  ", {}, {}, proc.createStateTree(), error).isEmpty(), "a name is needed");
+        }
+
+        beginTest ("preset browser: search, favourites, tags, < >");
+        {
+            PresetBrowser browser (proc);
+            const auto names = [&browser] {
+                StringArray n;
+                for (auto& e : browser.getShown()) n.add (e.name);
+                return n.joinIntoString (",");
+            };
+            browser.setFilter (PresetBrowser::kUser);
+            expectEquals (names(), String ("Choir Hall,Other"));
+            browser.setSearchText ("choir");
+            expectEquals (names(), String ("Choir Hall"));
+            browser.setSearchText ({});
+            browser.setFilter (PresetBrowser::kFavourites);
+            expectEquals (names(), String ("Choir Hall"));
+            browser.setFilter (PresetBrowser::kAll);
+            browser.setTagSelected ("choir", true);
+            expectEquals (names(), String ("Choir Hall"));
+            browser.setTagSelected ("choir", false);
+            browser.setFilter (PresetBrowser::kUser);
+            proc.loadUserPreset (renamedKey (users, "Choir Hall"));
+            browser.step (1);
+            expectEquals (proc.getStatus().userPresetName, String ("Other"));
+            browser.step (1);
+            expectEquals (proc.getStatus().userPresetName, String ("Choir Hall"));
+        }
+        UserPresetLibrary::folderOverride().deleteRecursively();
+        users.rescan();
+    }
+
+    static String renamedKey (UserPresetLibrary& users, const String& name)
+    {
+        for (auto& p : users.getUserPresets())
+            if (p.name == name) return p.key;
+        return {};
     }
 
     static void set (Concert7Processor& p, const char* id, float value)

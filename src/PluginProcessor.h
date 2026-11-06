@@ -79,8 +79,19 @@ public:
     /** Undo / redo: sets parameters (0..1) and the impulse response as they were. Nothing is handed over,
         DECAY is not taken from the preset. Message thread. */
     void restoreValues (const std::vector<std::pair<juce::RangedAudioParameter*, float>>& values,
-                        const juce::String& presetId, float distanceReference);
+                        const juce::String& presetId, float distanceReference, const juce::String& userPresetKey);
     float getDistanceReference() const { return distanceReference.load(); }
+
+    /** User presets: the whole sound in a file (see UserPresetLibrary). Loading keeps the kept groups and is
+        one undo step. Message thread. */
+    bool loadUserPreset (const juce::String& key);
+    /** Saves the current sound as a user preset (replacing one of that name); returns its key or empty. */
+    juce::String saveUserPreset (const juce::String& name, const juce::StringArray& tags, const juce::String& notes,
+                                 juce::String& error);
+    /** The user preset in use, empty when a library preset is (or was changed to). */
+    juce::String getUserPresetKey() const;
+    /** After the user preset was renamed or deleted in the browser. */
+    void userPresetRenamed (const juce::String& oldKey, const juce::String& newKey);
 
     /** A/B comparison: two complete settings (impulse response included), both stored with the project.
         Choosing the other slot keeps the current one in its slot. */
@@ -99,6 +110,8 @@ public:
         float nativeRT = 0.0f;
         int fileRate = 0;
         bool trueStereo = false;
+        juce::String userPresetName;   // a user preset is loaded
+        bool userPresetModified = false;
     };
     Status getStatus() const;
     std::shared_ptr<const BuiltIR> getCurrentIR() const { return engine.getActiveIR(); }
@@ -201,6 +214,14 @@ private:
 
     mutable juce::CriticalSection statusLock;
     juce::String presetId;
+    // the user preset in use and its values (0..1, NaN = not compared: a kept group) to show changes
+    juce::String userPresetKey, userPresetName, userPresetIR;
+    std::vector<float> userPresetValues;
+    /** Without presetState nothing is compared (the preset file is not at hand). */
+    void setUserPreset (const juce::String& key, const juce::String& name, const juce::ValueTree& presetState,
+                        GroupMask notCompared);
+    juce::String notice;                 // shown for a while instead of the readout
+    juce::uint32 noticeUntil = 0;
     Status status;
     std::shared_ptr<SourceIR> source, patternSource;
     // the impulse responses used last: switching back (A/B, undo, the previous preset) skips loading and design

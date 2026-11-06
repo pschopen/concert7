@@ -8,6 +8,7 @@
 //                         [--block N] [--tail SECONDS] [--sr RATE]
 //   concert7-dev ir       --out IR.wav [--preset ID] [--set id=value ...] [--sr RATE]
 //   concert7-dev snapshot --out UI.png [--tab 0..4] [--welcome] [--preset ID] [--scale S] [--keep decay,output]
+//                         [--browser SEARCH]
 //   concert7-dev bench    [--preset ID] [--seconds S] [--block N] [--set ...]
 //   concert7-dev presets  [--irs DIR]            (lists presets with their analysed reverb times)
 //   concert7-dev analyze  --preset ID [--sr RATE] (per band analysis of one preset)
@@ -204,6 +205,16 @@ namespace
         editor->setSize (roundToInt (MainPanel::kWidth * scale), roundToInt (MainPanel::kHeight * scale));
         if (hasArg (args, "--tab") && ed != nullptr)
             ed->getPanel().showTab (argValue (args, "--tab").getIntValue());
+        if (hasArg (args, "--browser") && ed != nullptr) // the preset browser with a few user presets
+        {
+            String error;
+            proc->saveUserPreset ("Vocal Plate Dark", { "vocals", "dark" }, "Warm, short", error);
+            proc->saveUserPreset ("Drum Room", { "drums" }, {}, error);
+            proc->getShared().getUserPresets().setFavourite ("Halls/01 Large Hall", true);
+            proc->getShared().getUserPresets().setLibraryTags ("Halls/01 Large Hall", { "orchestra" });
+            ed->getPanel().showBrowser (true);
+            ed->getPanel().getBrowser().setSearchText (argValue (args, "--browser"));
+        }
         if (ed != nullptr)
             ed->getPanel().showWelcome (hasArg (args, "--welcome"));
         if (auto* overlay = ed != nullptr ? ed->getPanel().getWelcome() : nullptr)
@@ -494,6 +505,8 @@ int main (int argc, char* argv[])
     SharedState::settingsFileOverride().deleteFile();
     SharedState::installFolderOverride() = File::getSpecialLocation (File::tempDirectory).getChildFile ("concert7-dev-install");
     SharedState::installFolderOverride().deleteRecursively();
+    UserPresetLibrary::folderOverride() = File::getSpecialLocation (File::tempDirectory).getChildFile ("concert7-dev-presets");
+    UserPresetLibrary::folderOverride().deleteRecursively();
 
     String irs = argValue (args, "--irs", SystemStats::getEnvironmentVariable ("CONCERT7_IR_DIR", {}));
     if (irs.isNotEmpty())
