@@ -184,6 +184,30 @@ public:
             expectEquals (ir->length(), src->length() + pd);
         }
 
+        beginTest ("offset moves the whole response");
+        {
+            auto p = neutral;
+            p.offsetMs = 50.0f;
+            auto later = designIR (*src, nullptr, p);
+            const int sh = (int) std::lround (0.05 * sr);
+            expectEquals (later->length(), src->length() + sh);
+            expectLessThan (energy (later->ch[0], 0, sh), 1e-12, "leading silence");
+            float maxDiff = 0.0f;
+            for (int i = 0; i < src->length(); ++i)
+                maxDiff = std::max (maxDiff, std::abs (later->ch[0][(size_t) (i + sh)] - src->ch[0][(size_t) i]));
+            expectLessThan (maxDiff, 1e-6f, "shifted, otherwise unchanged");
+
+            p.offsetMs = -50.0f;
+            auto earlier = designIR (*src, nullptr, p);
+            expectEquals (earlier->length(), src->length() - sh);
+            expectWithinAbsoluteError (earlier->ch[0][0], 0.0f, 1e-6f, "fades in");
+            maxDiff = 0.0f;
+            for (int i = (int) (0.01 * sr); i < earlier->length(); ++i)
+                maxDiff = std::max (maxDiff, std::abs (earlier->ch[0][(size_t) i] - src->ch[0][(size_t) (i + sh)]));
+            expectLessThan (maxDiff, 1e-6f, "start cut, rest unchanged");
+            expectWithinAbsoluteError (earlier->onsetMs, (float) std::max (0.0, 1000.0 * src->onset / sr - 50.0), 0.05f);
+        }
+
         beginTest ("early / late levels");
         {
             auto p = neutral;

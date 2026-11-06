@@ -392,6 +392,7 @@ DesignParams Concert7Processor::readDesignParams() const
     DesignParams d;
     d.decay = getEffectiveDecay();
     d.predelayMs = getEffectivePredelayMs();
+    d.offsetMs = param (ParamID::irOffset);
     d.earlyDb = param (ParamID::early);
     d.lateDb = param (ParamID::late);
     d.vlfDb = param (ParamID::vlf);

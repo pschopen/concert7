@@ -28,7 +28,7 @@ namespace
     }
     const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS", "SPACE" };
     const char* const kTabTooltips[] = {
-        "Early reflections, late reverb, delay and stereo propagation",
+        "Early reflections, late reverb, delay, start of the impulse response and stereo propagation",
         "Decay time of the lows and highs, separately",
         "Equalizer for the reverb signal (the dry signal is not affected)",
         "Modulation, Smooth and ducking",
@@ -60,6 +60,9 @@ namespace
                             "Turn it down if the reverb muddies the low end." },
             { ParamID::predelaySync, "Sets the pre-delay as a note value of the host tempo." },
             { ParamID::predelayNote, "Note value for the pre-delay (only with SYNC)." },
+            { ParamID::irOffset, "Moves the start of the whole impulse response. Positive: the reverb starts later. "
+                                 "Negative: its beginning is cut - a negative pre-delay that thins out or removes "
+                                 "the early reflections and lets the tail come in sooner." },
             { ParamID::delayTime, "Spacing of the echoes. The delay adds three repeats of the reverb - a rhythmic reverb tail." },
             { ParamID::delayLevel, "Volume of the echoes. All the way down: delay off." },
             { ParamID::delaySync, "Sets the delay time as a note value of the host tempo." },
@@ -212,6 +215,7 @@ MainPanel::MainPanel (Concert7Processor& p)
     addKnob (knobs, rev, ParamID::vlf, "VLF");
     addKnob (knobs, rev, ParamID::delayTime, "TIME");
     addKnob (knobs, rev, ParamID::delayLevel, "LEVEL");
+    addKnob (knobs, rev, ParamID::irOffset, "OFFSET", true);
     predelaySync = std::make_unique<ParamToggle> (state, ParamID::predelaySync, "SYNC");
     delaySync = std::make_unique<ParamToggle> (state, ParamID::delaySync, "SYNC");
     predelayNote = std::make_unique<ParamCombo> (state, ParamID::predelayNote);
@@ -704,7 +708,7 @@ void MainPanel::paint (Graphics& g)
         frame (pages[0], { 8, 8, 196, 180 }, "EARLY REFLECTIONS");
         frame (pages[0], { 212, 8, 196, 180 }, "LATE REVERB");
         frame (pages[0], { 416, 8, 300, 180 }, "DELAY");
-        frame (pages[0], { 724, 8, 220, 180 }, "PRE-DELAY / ROUTING");
+        frame (pages[0], { 724, 8, 220, 180 }, "TIMING / ROUTING");
     }
     else if (currentTab == 1)
     {
@@ -842,6 +846,7 @@ void MainPanel::resized()
     predelaySync->setBounds (736, 34, 92, 26);
     predelayNoteLabel.setBounds (736, 66, 110, 14);
     predelayNote->setBounds (736, 82, 92, 24);
+    small (rev, ParamID::irOffset, { 846, 22, 86, 92 });
     crossfeedLabel.setBounds (736, 116, 120, 14);
     crossfeed->setBounds (736, 132, 196, 24);
 

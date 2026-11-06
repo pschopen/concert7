@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- New OFFSET control in the REVERB tab (−250 – +250 ms, frame now called TIMING / ROUTING): moves the start of the
+  whole impulse response. Negative values cut its beginning with a short fade-in – a negative pre-delay that thins
+  out or removes the early reflections and brings the tail in sooner. Like Decay it rebuilds the impulse response
 - New Smooth control (0 – 100 %): evens out resonances, ringing and bumps in the decay of the late reverb.
   Like Decay it rebuilds the impulse response, so the change fades in after a moment. At 0 % (default)
   the reverb sounds exactly as before

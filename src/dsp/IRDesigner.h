@@ -20,6 +20,8 @@
 //     band envelope towards its fitted decay line (bumps, late echoes).
 //  4. Early part (optionally from another preset = "early pattern"), late part
 //     (shifted by the pre-delay) and delay voices are summed with their levels.
+//     The offset finally moves the whole response: later (leading silence) or
+//     earlier (its start is cut, with a short fade-in).
 
 #pragma once
 
@@ -62,6 +64,7 @@ struct DesignParams
 {
     float decay = 2.0f;          // target mid-band RT60 in seconds
     float predelayMs = 0.0f;     // extra delay of the late reverb
+    float offsetMs = 0.0f;       // start of the whole response: > 0 later, < 0 earlier (the start is cut)
     float earlyDb = 0.0f;
     float lateDb = 0.0f;
     float vlfDb = 0.0f;          // <= kVlfOffDb means off
@@ -100,7 +103,7 @@ struct BuiltIR
     // distance mode: energy relative to a unit impulse, 500 Hz - 2 kHz, per output channel
     float midEnergy = 0.0f;          // all four paths
     float midEnergyDiagonal = 0.0f;  // L->L and R->R only (no crossfeed)
-    float onsetMs = 0.0f;            // first reflection of the preset (for the distance display)
+    float onsetMs = 0.0f;            // first reflection of the preset, moved by the offset (for the distance display)
 };
 
 /** Loads the files of a preset into a SourceIR at the given host rate. */

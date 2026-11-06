@@ -19,6 +19,7 @@ namespace
 {
     constexpr float kSplitMaxSeconds  = 0.08f;  // early/late crossover after the onset
     constexpr float kSplitFadeSeconds = 0.02f;
+    constexpr float kOffsetFadeSeconds = 0.002f; // fade-in where a negative offset cuts the response
     constexpr float kVlfCrossoverHz   = 120.0f;
     constexpr float kNormTargetPower  = 0.25f;  // white noise in -> -6 dB wet out
     constexpr int   kCrossfadeFrames  = 4;      // measured -> synthesised tail
@@ -292,7 +293,7 @@ namespace
 
 bool DesignParams::operator== (const DesignParams& o) const
 {
-    return decay == o.decay && predelayMs == o.predelayMs && earlyDb == o.earlyDb && lateDb == o.lateDb
+    return decay == o.decay && predelayMs == o.predelayMs && offsetMs == o.offsetMs && earlyDb == o.earlyDb && lateDb == o.lateDb
         && vlfDb == o.vlfDb && erRolloffHz == o.erRolloffHz && lateRolloffHz == o.lateRolloffHz
         && delayMs == o.delayMs && delayDb == o.delayDb && lowFreq == o.lowFreq && lowMult == o.lowMult
         && highFreq == o.highFreq && highMult == o.highMult && smooth == o.smooth;
@@ -722,7 +723,8 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     out->name = src.name;
     out->nativeRT = src.nativeRT;
     out->targetRT = p.decay;
-    out->onsetMs = (float) (1000.0 * src.onset / src.sampleRate);
+    const int shift = (int) std::lround (p.offsetMs * 0.001 * src.sampleRate);
+    out->onsetMs = (float) (1000.0 * std::max (0, src.onset + shift) / src.sampleRate);
     if (len <= 0) return out;
 
     const std::vector<int> chans = src.trueStereo ? std::vector<int> { 0, 1, 2, 3 } : std::vector<int> { 0, 3 };
@@ -1023,8 +1025,12 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     const int lateLen = (int) late[(size_t) chans.front()].size();
     const int maxLen = (int) (kMaxIRSeconds * sr);
     int total = std::max ((int) early[(size_t) chans.front()].size(), pd + lateLen + voices * dd);
-    const bool capped = total > maxLen;
-    total = std::min (total, maxLen);
+    // offset: leading silence, or the start is cut (keeping at least one sample)
+    const int pad = std::max (0, shift);
+    const int cut = std::min (std::max (0, -shift), total - 1);
+    const bool capped = total - cut + pad > maxLen;
+    total = std::min (total, maxLen + cut - pad);
+    const int fadeIn = std::min (total - cut, std::max (8, (int) (kOffsetFadeSeconds * sr)));
 
     for (int c : chans)
     {
@@ -1049,7 +1055,16 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
             for (int n = 0; n < fadeLen; ++n)
                 o[(size_t) (total - 1 - n)] *= (float) n / fadeLen;
         }
+
+        if (cut > 0)
+        {
+            o.erase (o.begin(), o.begin() + cut);
+            for (int n = 0; n < fadeIn; ++n)
+                o[(size_t) n] *= (float) (0.5 - 0.5 * std::cos (kPi * n / fadeIn));
+        }
+        o.insert (o.begin(), (size_t) pad, 0.0f);
     }
+    total = total - cut + pad;
 
     // mid band energy for the distance mode (the level of the reverb against the direct sound)
     {

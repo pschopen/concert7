@@ -74,6 +74,7 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Presets | the 134 Samplicity M7 captures (Halls, Plates, Rooms, Chambers, Ambience, Spaces) + your own IRs (mono, stereo or 4 channel true stereo) in the IR folder |
 | Decay | 0.2 – 30 s, starts at each preset's analysed native RT60 (optionally held on preset change) |
 | Pre-delay | 0 – 500 ms or tempo synced, applied to the late reverb |
+| Offset | −250 – +250 ms, moves the start of the whole impulse response; negative values cut its beginning (negative pre-delay, thinner or no early reflections) |
 | Levels | Early, Late and VLF (late reverb below ~120 Hz) |
 | Roll-off | separate low pass for early reflections and late reverb, 80 Hz – 22 kHz |
 | Multi-band decay | low shelf 80 Hz – 4.8 kHz and high shelf 200 Hz – 16 kHz, ×0.2 – ×4 |
@@ -116,7 +117,8 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    third-octave neighbourhood (measured with the native decay removed, so long ringing counts as much as loud) and
    pulls each band envelope towards its fitted decay line.
 4. **Assembly**: early part (own or from the selected pattern, with roll-off), late part shifted by the pre-delay,
-   plus delay voices.
+   plus delay voices. The offset then moves the whole response: leading silence, or its start is cut with a 2 ms
+   fade-in.
 
 **SPACE tab** (`src/dsp/Distance.cpp`): two optional ways to set Concert7 in terms of a real hall. Both start from
 the current sound when switched on, and while off their greyed knobs show the values that match it.

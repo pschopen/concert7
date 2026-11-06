@@ -15,6 +15,13 @@ String formatMs (float ms)
     return String (ms, ms < 10.0f ? 1 : 0) + " ms";
 }
 
+String formatOffsetMs (float ms)
+{
+    if (std::abs (ms) < 0.05f)
+        return "0 ms";
+    return (ms > 0.0f ? "+" : "-") + formatMs (std::abs (ms));
+}
+
 String formatSeconds (float s)
 {
     if (s < 1.0f)
@@ -119,6 +126,9 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (floatParam (ParamID::predelay, "Pre-Delay", skewedRange (0.0f, 500.0f, 80.0f), 0.0f, "ms", ms));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::predelaySync, 1 }, "Pre-Delay Sync", false));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamID::predelayNote, 1 }, "Pre-Delay Note", noteNames(), 4));
+    // start of the whole impulse response, finer around 0
+    layout.add (floatParam (ParamID::irOffset, "IR Offset", NormalisableRange<float> (-250.0f, 250.0f, 0.0f, 0.5f, true), 0.0f, "ms",
+                            [] (float v, int) { return formatOffsetMs (v); }));
     layout.add (floatParam (ParamID::decay, "Decay", skewedRange (0.2f, 30.0f, 3.0f), 2.0f, "s", sec));
     layout.add (floatParam (ParamID::early, "Early", NormalisableRange<float> (kLevelOffDb, 6.0f, 0.0f), 0.0f, "dB",
                             [] (float v, int) { return formatDb (v, kLevelOffDb); }));
@@ -207,7 +217,7 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 bool isIRParameter (const String& id)
 {
     static const StringArray irParams {
-        ParamID::predelay, ParamID::predelaySync, ParamID::predelayNote, ParamID::decay,
+        ParamID::predelay, ParamID::predelaySync, ParamID::predelayNote, ParamID::irOffset, ParamID::decay,
         ParamID::early, ParamID::late, ParamID::vlf, ParamID::erRolloff, ParamID::lateRolloff,
         ParamID::erPattern, ParamID::delayTime, ParamID::delaySync, ParamID::delayNote,
         ParamID::delayLevel, ParamID::lowFreq, ParamID::lowMult, ParamID::highFreq, ParamID::highMult,

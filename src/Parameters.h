@@ -15,6 +15,7 @@ namespace ParamID
     inline constexpr const char* predelay      = "predelay";
     inline constexpr const char* predelaySync  = "predelaySync";
     inline constexpr const char* predelayNote  = "predelayNote";
+    inline constexpr const char* irOffset      = "irOffset";
     inline constexpr const char* decay         = "decay";
     inline constexpr const char* early         = "early";
     inline constexpr const char* late          = "late";
@@ -108,6 +109,7 @@ bool isIRParameter (const juce::String& paramID);
 
 /** Human readable value strings shared by parameters, the display and tests. */
 juce::String formatMs (float ms);
+juce::String formatOffsetMs (float ms);
 juce::String formatSeconds (float s);
 juce::String formatHz (float hz);
 juce::String formatRolloff (float hz);
