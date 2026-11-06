@@ -84,6 +84,7 @@ private:
     std::shared_ptr<const BuiltIR> shownIR;
     juce::String lastPresetId;
     float lastNativeRT = -1.0f;
+    GroupMask shownKept = ~GroupMask (0);
     juce::Rectangle<int> mainArea, pageArea;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainPanel)

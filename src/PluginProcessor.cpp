@@ -550,7 +550,7 @@ void Concert7Processor::buildNow()
     auto dp = readDesignParams();
     // a newly selected preset starts at its own decay time (the hall model keeps its own)
     const bool presetChanged = userPresetChange.exchange (false);
-    if (presetChanged && ! shared->getHoldDecay() && ! isHallOn())
+    if (presetChanged && ! shared->isKept (ParamGroup::Decay) && ! isHallOn())
     {
         // a newly selected preset starts at its own decay time
         auto* decayParam = apvts.getParameter (ParamID::decay);
@@ -733,11 +733,22 @@ void Concert7Processor::selectPreset (const String& id, bool userAction)
 
 void Concert7Processor::resetParameters()
 {
-    // every control returns to its default; DECAY follows the preset in the next build
-    // (or keeps the decay in effect, the hall's included, when it is held)
-    if (shared->getHoldDecay() && isHallOn())
-        if (auto* p = apvts.getParameter (ParamID::decay))
-            p->setValueNotifyingHost (p->convertTo0to1 (getEffectiveDecay()));
+    // every control returns to its default unless its group is kept; DECAY follows the preset in the next
+    // build (or keeps the decay in effect, the hall's included, when it is kept)
+    applyParameters (ValueTree (apvts.state.getType()), shared->getKeptGroups(), true);
+}
+
+void Concert7Processor::applyParameters (const ValueTree& tree, GroupMask keep, bool skipDecay)
+{
+    const bool keepSpace = (keep & groupBit (ParamGroup::Space)) != 0;
+    // a kept DECAY or MIX keeps the value in effect when the mode that drives it is switched off here ...
+    const float decayInEffect = (keep & groupBit (ParamGroup::Decay)) != 0 && ! keepSpace && isHallOn()
+                                    ? getEffectiveDecay() : -1.0f;
+    const float mixInEffect = (keep & groupBit (ParamGroup::Output)) != 0 && ! keepSpace && isDistanceOn()
+                                  ? makeDistanceState (true, false).direct.mix * 100.0f : -1.0f;
+    // ... and a kept distance mode keeps the MIX it moves
+    const bool keepMix = keepSpace && isDistanceOn();
+    const bool hasModMode = tree.getChildWithProperty ("id", ParamID::modMode).isValid() || tree.getNumChildren() == 0;
 
     // nothing switched on or off here may hand values over afterwards
     pendingDistance = -1.0f;
@@ -746,10 +757,28 @@ void Concert7Processor::resetParameters()
     pendingDecay = -1.0f;
     handbackPending = false;
     restoringState = true;
+    auto setTo = [] (RangedAudioParameter& rp, float value) {
+        if (rp.getValue() != value) rp.setValueNotifyingHost (value);
+    };
     for (auto* prm : getParameters())
         if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
-            if (rp->paramID != ParamID::decay)
-                rp->setValueNotifyingHost (rp->getDefaultValue());
+        {
+            if ((keep & groupBit (groupOf (rp->paramID))) != 0) continue;
+            if ((skipDecay && rp->paramID == ParamID::decay) || (keepMix && rp->paramID == ParamID::mix)) continue;
+            const auto child = tree.getChildWithProperty ("id", rp->paramID);
+            float value = child.isValid() ? rp->convertTo0to1 ((float) child.getProperty ("value"))
+                                          : rp->getDefaultValue();
+            // projects from before the modulation modes keep their vibrato
+            if (rp->paramID == ParamID::modMode && ! hasModMode)
+                value = rp->convertTo0to1 ((float) ModMode::Vibrato);
+            setTo (*rp, value);
+        }
+    if (decayInEffect > 0.0f)
+        if (auto* p = apvts.getParameter (ParamID::decay))
+            setTo (*p, p->convertTo0to1 (decayInEffect));
+    if (mixInEffect >= 0.0f)
+        if (auto* p = apvts.getParameter (ParamID::mix))
+            setTo (*p, p->convertTo0to1 (mixInEffect));
     restoringState = false;
 }
 
@@ -816,31 +845,9 @@ ValueTree Concert7Processor::createStateTree()
 void Concert7Processor::applyStateTree (const ValueTree& tree, GroupMask keep)
 {
     const auto id = tree.getProperty ("presetId").toString();
-    // projects from before the modulation modes keep their vibrato
-    const bool hasModMode = tree.getChildWithProperty ("id", ParamID::modMode).isValid();
-    const bool keepSpace = (keep & groupBit (ParamGroup::Space)) != 0;
-    if (! keepSpace)
+    if ((keep & groupBit (ParamGroup::Space)) == 0)
         distanceReference = (float) tree.getProperty ("distanceReference", 8.0);
-    // nothing switched on or off here may hand values over afterwards
-    pendingDistance = -1.0f;
-    pendingHallVolume = -1.0f;
-    pendingHallAbsorption = -1.0f;
-    pendingDecay = -1.0f;
-    handbackPending = false;
-    restoringState = true;
-    for (auto* prm : getParameters())
-        if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
-        {
-            if ((keep & groupBit (groupOf (rp->paramID))) != 0) continue;
-            const auto child = tree.getChildWithProperty ("id", rp->paramID);
-            float value = child.isValid() ? rp->convertTo0to1 ((float) child.getProperty ("value"))
-                                          : rp->getDefaultValue();
-            if (rp->paramID == ParamID::modMode && ! hasModMode)
-                value = rp->convertTo0to1 ((float) ModMode::Vibrato);
-            if (rp->getValue() != value)
-                rp->setValueNotifyingHost (value);
-        }
-    restoringState = false;
+    applyParameters (tree, keep, false);
     {
         const ScopedLock sl (statusLock);
         presetId = id.isNotEmpty() ? id : shared->getDefaultPresetId();

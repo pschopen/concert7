@@ -7,7 +7,7 @@
 //   concert7-dev render   --in IN.wav --out OUT.wav [--irs DIR] [--preset ID] [--set id=value ...]
 //                         [--block N] [--tail SECONDS] [--sr RATE]
 //   concert7-dev ir       --out IR.wav [--preset ID] [--set id=value ...] [--sr RATE]
-//   concert7-dev snapshot --out UI.png [--tab 0..4] [--welcome] [--preset ID] [--scale S]
+//   concert7-dev snapshot --out UI.png [--tab 0..4] [--welcome] [--preset ID] [--scale S] [--keep decay,output]
 //   concert7-dev bench    [--preset ID] [--seconds S] [--block N] [--set ...]
 //   concert7-dev presets  [--irs DIR]            (lists presets with their analysed reverb times)
 //   concert7-dev analyze  --preset ID [--sr RATE] (per band analysis of one preset)
@@ -189,6 +189,14 @@ namespace
         }
         if (! hasArg (args, "--welcome"))
             proc->getShared().setWelcomeDone (true);
+        if (hasArg (args, "--keep")) // e.g. --keep decay,output: the padlocks of kept groups
+        {
+            GroupMask kept = 0;
+            for (auto& key : StringArray::fromTokens (argValue (args, "--keep"), ",", {}))
+                for (int g = 0; g < kNumParamGroups; ++g)
+                    if (key == groupKey ((ParamGroup) g)) kept |= groupBit ((ParamGroup) g);
+            proc->getShared().setKeptGroups (kept);
+        }
 
         std::unique_ptr<AudioProcessorEditor> editor (proc->createEditor());
         auto* ed = dynamic_cast<Concert7Editor*> (editor.get());

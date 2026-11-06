@@ -185,12 +185,28 @@ void Knob::mouseDoubleClick (const MouseEvent& e)
         showValueEditor();
 }
 
+void Knob::setKept (bool k)
+{
+    if (kept == k) return;
+    kept = k;
+    repaint();
+}
+
 void Knob::paint (Graphics& g)
 {
     auto r = getLocalBounds().toFloat();
     g.setColour (isEnabled() ? Colours::textDim : Colours::textFaint);
-    g.setFont (labelFont (std::max (9.0f, captionHeight * 0.68f)));
-    g.drawFittedText (caption, r.removeFromTop (captionHeight).toNearestInt(), Justification::centred, 1);
+    const auto font = labelFont (std::max (9.0f, captionHeight * 0.68f));
+    g.setFont (font);
+    const auto captionArea = r.removeFromTop (captionHeight);
+    g.drawFittedText (caption, captionArea.toNearestInt(), Justification::centred, 1);
+    if (kept)
+    {
+        const float textW = std::min (captionArea.getWidth(), (float) GlyphArrangement::getStringWidthInt (font, caption));
+        const float size = captionHeight * 0.62f;
+        drawLock (g, Rectangle<float> (captionArea.getCentreX() + textW * 0.5f + 3.0f, captionArea.getCentreY() - size * 0.5f,
+                                       size, size), Colours::accent.withAlpha (isEnabled() ? 0.9f : 0.45f));
+    }
     if (valueEditor != nullptr && valueEditor->isVisible()) return;
     g.setColour (isEnabled() ? Colours::text : Colours::textFaint);
     g.setFont (uiFont (std::max (10.0f, valueHeight * 0.78f)));

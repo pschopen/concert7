@@ -210,7 +210,7 @@ MainPanel::MainPanel (Concert7Processor& p)
         addChildComponent (pages[(size_t) i]);
     }
     setupButton.onClick = [this] { showSetupMenu(); };
-    setupButton.setTooltip ("Impulse response library, interface size, hold decay on preset change, reset");
+    setupButton.setTooltip ("Impulse response library, interface size, settings kept on preset change, reset");
     addAndMakeVisible (setupButton);
 
     // reverb page
@@ -355,6 +355,13 @@ Knob& MainPanel::addKnob (std::vector<std::unique_ptr<Knob>>& list, Component& p
     auto k = std::make_unique<Knob> (state, id, caption, bipolar);
     k->onTouched = [this] (Knob& kn) { touch (kn); };
     k->onTabKey = [this] (Knob& kn, bool backwards) { editNextKnob (kn, backwards); };
+    k->onExtendMenu = [this] (Knob& kn, PopupMenu& menu) {
+        const auto group = groupOf (kn.getParamID());
+        auto& sh = processor.getShared();
+        menu.addSeparator();
+        menu.addItem ("Keep " + groupName (group).toLowerCase() + " when changing presets", true, sh.isKept (group),
+                      [&sh, group] { sh.setKeptGroups (sh.getKeptGroups() ^ groupBit (group)); });
+    };
     k->setTooltip (tooltipFor (id));
     parent.addAndMakeVisible (*k);
     list.push_back (std::move (k));
@@ -468,7 +475,13 @@ void MainPanel::showSetupMenu()
     menu.addItem (2, "Install impulse responses (ZIP)...");
     menu.addItem (3, "Rescan library");
     menu.addSeparator();
-    menu.addItem (4, "Hold decay when changing presets", true, shared.getHoldDecay());
+    PopupMenu keep;
+    const auto kept = shared.getKeptGroups();
+    keep.addItem (20, "All settings (only the impulse response changes)", true, kept == kAllGroups);
+    keep.addSeparator();
+    for (int g = 0; g < kNumParamGroups; ++g)
+        keep.addItem (30 + g, groupName ((ParamGroup) g), true, (kept & groupBit ((ParamGroup) g)) != 0);
+    menu.addSubMenu ("Keep when changing presets", keep, true, nullptr, kept != 0);
     PopupMenu sizes;
     const float scales[] = { 0.75f, 1.0f, 1.25f, 1.5f, 2.0f };
     for (int i = 0; i < 5; ++i)
@@ -490,7 +503,9 @@ void MainPanel::showSetupMenu()
                             }
                             else if (r == 2) showWelcome (true);
                             else if (r == 3) sh.rescan();
-                            else if (r == 4) sh.setHoldDecay (! sh.getHoldDecay());
+                            else if (r == 20) sh.setKeptGroups (sh.getKeptGroups() == kAllGroups ? 0 : kAllGroups);
+                            else if (r >= 30 && r < 30 + kNumParamGroups)
+                                sh.setKeptGroups (sh.getKeptGroups() ^ groupBit ((ParamGroup) (r - 30)));
                             else if (r >= 10 && r < 15)
                             {
                                 const float chosen[] = { 0.75f, 1.0f, 1.25f, 1.5f, 2.0f };
@@ -557,6 +572,15 @@ void MainPanel::timerCallback()
 
     const auto status = processor.getStatus();
     display.setStatus (status, processor.getShared().hasLibrary());
+
+    // padlocks on the knobs of kept groups (the setting is shared by all instances)
+    const auto kept = processor.getShared().getKeptGroups();
+    if (kept != shownKept)
+    {
+        shownKept = kept;
+        for (auto& k : knobs)
+            k->setKept ((kept & groupBit (groupOf (k->getParamID()))) != 0);
+    }
     if (status.loading) display.repaint();
 
     auto ir = processor.getCurrentIR();

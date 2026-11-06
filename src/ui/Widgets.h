@@ -30,6 +30,8 @@ public:
     void setDisplayOverride (float value, const juce::String& text);
     void clearDisplayOverride();
     const juce::String& getParamID() const { return paramID; }
+    /** Marks the knob with a padlock: its group stays when another preset is chosen. */
+    void setKept (bool kept);
     juce::String getValueText() const;
     juce::String getCaption() const { return caption; }
 
@@ -69,7 +71,7 @@ private:
     juce::RangedAudioParameter* parameter = nullptr;
     KnobSlider slider;
     std::unique_ptr<juce::TextEditor> valueEditor;
-    bool overridden = false;
+    bool overridden = false, kept = false;
     juce::String overrideText;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
 };

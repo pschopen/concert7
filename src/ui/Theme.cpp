@@ -334,4 +334,17 @@ Rectangle<int> Concert7LookAndFeel::getTooltipBounds (const String& tipText, Poi
                            screenPos.y > parentArea.getCentreY() ? screenPos.y - (h + 6) : screenPos.y + 6, w, h)
         .constrainedWithin (parentArea);
 }
+void drawLock (Graphics& g, Rectangle<float> area, juce::Colour colour)
+{
+    const float h = std::min (area.getHeight(), area.getWidth() * 1.3f);
+    auto r = area.withSizeKeepingCentre (h / 1.3f, h);
+    auto body = r.removeFromBottom (h * 0.55f);
+    Path shackle;
+    shackle.addCentredArc (body.getCentreX(), body.getY(), body.getWidth() * 0.32f, r.getHeight() * 0.85f, 0.0f,
+                           -MathConstants<float>::halfPi, MathConstants<float>::halfPi, true);
+    g.setColour (colour);
+    g.strokePath (shackle, PathStrokeType (std::max (1.0f, h * 0.12f)));
+    g.fillRoundedRectangle (body, h * 0.08f);
+}
+
 } // namespace concert7

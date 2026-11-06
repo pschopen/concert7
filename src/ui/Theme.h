@@ -58,6 +58,9 @@ public:
                                            juce::Rectangle<int> parentArea) override;
 };
 
+/** Small padlock: a kept group (it stays when another preset is chosen). */
+void drawLock (juce::Graphics& g, juce::Rectangle<float> area, juce::Colour colour);
+
 /** Draws a machined screw head (purely decorative). */
 void drawScrew (juce::Graphics& g, juce::Point<float> centre, float radius);
 } // namespace concert7

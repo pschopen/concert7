@@ -131,6 +131,7 @@ private:
     void handleAsyncUpdate() override;
     void requestRebuild();
     void resetParameters();
+    void applyParameters (const juce::ValueTree& tree, GroupMask keep, bool skipDecay);
     void buildNow();
     DesignParams readDesignParams() const;
     int lateLayout() const;            // which streams the modulation needs: 0 none, 1 late, 2 late + variant

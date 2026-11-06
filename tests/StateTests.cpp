@@ -115,6 +115,51 @@ public:
             expectWithinAbsoluteError (get (proc, ParamID::mix), 30.0f, 0.01f);
             expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), 0.0f, 0.01f);
         }
+
+        beginTest ("kept groups stay when a preset is chosen, the others return to their defaults");
+        {
+            auto& shared = proc.getShared();
+            shared.setKeptGroups (groupBit (ParamGroup::Output) | groupBit (ParamGroup::EQ));
+            set (proc, ParamID::mix, 70.0f);
+            set (proc, ParamID::eqMidGain, 4.0f);
+            set (proc, ParamID::eqHpOn, 1.0f);
+            set (proc, ParamID::predelay, 50.0f);
+            set (proc, ParamID::modDepth, 40.0f);
+            proc.selectPreset (proc.getPresetId(), true);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 70.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), 4.0f, 0.01f);
+            expectEquals (get (proc, ParamID::eqHpOn), 1.0f);
+            expectWithinAbsoluteError (get (proc, ParamID::predelay), 0.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::modDepth), 0.0f, 0.01f);
+
+            shared.setKeptGroups (kAllGroups);
+            set (proc, ParamID::predelay, 50.0f);
+            proc.selectPreset (proc.getPresetId(), true);
+            expectWithinAbsoluteError (get (proc, ParamID::predelay), 50.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 70.0f, 0.01f);
+
+            // a user preset or A/B state is applied with the kept groups as well
+            auto tree = proc.createStateTree();
+            set (proc, ParamID::mix, 20.0f);
+            proc.applyStateTree (tree, shared.getKeptGroups());
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 20.0f, 0.01f);
+
+            shared.setKeptGroups (0);
+            proc.selectPreset (proc.getPresetId(), true);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 30.0f, 0.01f);
+        }
+
+        beginTest ("kept groups: the old hold decay setting becomes the kept decay");
+        {
+            auto& settings = proc.getShared().getSettings();
+            settings.removeValue ("keepOnPresetChange");
+            settings.setValue ("holdDecay", true);
+            expectEquals ((int) proc.getShared().getKeptGroups(), (int) groupBit (ParamGroup::Decay));
+            proc.getShared().setKeptGroups (groupBit (ParamGroup::Decay) | groupBit (ParamGroup::Ducker));
+            expect (! settings.containsKey ("holdDecay"));
+            expect (proc.getShared().isKept (ParamGroup::Ducker) && ! proc.getShared().isKept (ParamGroup::EQ));
+            proc.getShared().setKeptGroups (0);
+        }
     }
 
     static void set (Concert7Processor& p, const char* id, float value)

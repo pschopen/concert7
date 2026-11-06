@@ -6,6 +6,7 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_events/juce_events.h>
 #include "dsp/IRLibrary.h"
+#include "Parameters.h"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -91,8 +92,10 @@ public:
     // ---- global options
     bool isWelcomeDone() const;
     void setWelcomeDone (bool done);
-    bool getHoldDecay() const;
-    void setHoldDecay (bool hold);
+    /** Groups of parameters that stay when another preset (or a user preset) is chosen. */
+    GroupMask getKeptGroups() const;
+    void setKeptGroups (GroupMask groups);
+    bool isKept (ParamGroup g) const { return (getKeptGroups() & groupBit (g)) != 0; }
     float getUIScale() const;
     void setUIScale (float scale);
 

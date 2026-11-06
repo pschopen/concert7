@@ -11,7 +11,8 @@ namespace Keys
 {
     static const char* irFolder    = "irFolder";
     static const char* welcomeDone = "welcomeDone";
-    static const char* holdDecay   = "holdDecay";
+    static const char* holdDecay   = "holdDecay";      // before the groups: only DECAY could be kept
+    static const char* keepGroups  = "keepOnPresetChange";
     static const char* uiScale     = "uiScale";
 }
 
@@ -304,8 +305,28 @@ void SharedState::withLibrary (const std::function<void (const IRLibrary&)>& f) 
 
 bool SharedState::isWelcomeDone() const   { return settings->getBoolValue (Keys::welcomeDone, false); }
 void SharedState::setWelcomeDone (bool d) { settings->setValue (Keys::welcomeDone, d); settings->saveIfNeeded(); }
-bool SharedState::getHoldDecay() const    { return settings->getBoolValue (Keys::holdDecay, false); }
-void SharedState::setHoldDecay (bool h)   { settings->setValue (Keys::holdDecay, h); settings->saveIfNeeded(); }
+GroupMask SharedState::getKeptGroups() const
+{
+    if (! settings->containsKey (Keys::keepGroups))
+        return settings->getBoolValue (Keys::holdDecay, false) ? groupBit (ParamGroup::Decay) : 0;
+    GroupMask mask = 0;
+    for (auto& key : StringArray::fromTokens (settings->getValue (Keys::keepGroups), ",", {}))
+        for (int g = 0; g < kNumParamGroups; ++g)
+            if (key.trim() == groupKey ((ParamGroup) g))
+                mask |= groupBit ((ParamGroup) g);
+    return mask;
+}
+
+void SharedState::setKeptGroups (GroupMask groups)
+{
+    StringArray keys;
+    for (int g = 0; g < kNumParamGroups; ++g)
+        if ((groups & groupBit ((ParamGroup) g)) != 0)
+            keys.add (groupKey ((ParamGroup) g));
+    settings->setValue (Keys::keepGroups, keys.joinIntoString (","));
+    settings->removeValue (Keys::holdDecay);
+    settings->saveIfNeeded();
+}
 float SharedState::getUIScale() const     { return (float) settings->getDoubleValue (Keys::uiScale, 1.0); }
 void SharedState::setUIScale (float s)    { settings->setValue (Keys::uiScale, s); settings->saveIfNeeded(); }
 } // namespace concert7

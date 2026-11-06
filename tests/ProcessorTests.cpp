@@ -99,7 +99,7 @@ public:
             expectEquals (st.presetName, String ("Studio A"));
             expectWithinAbsoluteError (getParam (proc, ParamID::decay), jlimit (0.2f, 30.0f, st.nativeRT), 0.02f);
 
-            proc.getShared().setHoldDecay (true);
+            proc.getShared().setKeptGroups (groupBit (ParamGroup::Decay));
             setParam (proc, ParamID::decay, 5.0f);
             settle (proc);
             proc.selectPreset ("Plates/01 Bright Plate", true);
@@ -107,7 +107,35 @@ public:
             expectWithinAbsoluteError (getParam (proc, ParamID::decay), 5.0f, 0.01f);
             auto ir = proc.getCurrentIR();
             expect (ir != nullptr && std::abs (ir->targetRT - 5.0f) < 0.01f, "IR uses the held decay");
-            proc.getShared().setHoldDecay (false);
+            proc.getShared().setKeptGroups (0);
+        }
+
+        beginTest ("kept mix keeps the mix in effect when a new preset switches the distance mode off");
+        {
+            setParam (proc, ParamID::mix, 40.0f);
+            setParam (proc, ParamID::distOn, 1.0f);
+            settle (proc);
+            setParam (proc, ParamID::distance, getParam (proc, ParamID::distance) * 2.5f);
+            settle (proc);
+            const float inEffect = proc.getDistanceState (false).direct.mix * 100.0f;
+            expectGreaterThan (std::abs (inEffect - 40.0f), 1.0f, "the distance moves the mix");
+            proc.getShared().setKeptGroups (groupBit (ParamGroup::Output));
+            proc.selectPreset ("Rooms/01 Studio A", true);
+            settle (proc);
+            expect (! proc.isDistanceOn());
+            expectWithinAbsoluteError (getParam (proc, ParamID::mix), inEffect, 0.05f);
+
+            // a kept space keeps the distance mode and the mix it moves
+            setParam (proc, ParamID::distOn, 1.0f);
+            settle (proc);
+            const float mix = getParam (proc, ParamID::mix), distance = getParam (proc, ParamID::distance);
+            proc.getShared().setKeptGroups (groupBit (ParamGroup::Space));
+            proc.selectPreset ("Plates/01 Bright Plate", true);
+            settle (proc);
+            expect (proc.isDistanceOn());
+            expectWithinAbsoluteError (getParam (proc, ParamID::mix), mix, 0.01f);
+            expectWithinAbsoluteError (getParam (proc, ParamID::distance), distance, 0.01f);
+            proc.getShared().setKeptGroups (0);
         }
 
         beginTest ("choosing a preset, also the current one again, resets all parameters");
@@ -517,12 +545,12 @@ public:
             expectGreaterThan (bigger, drier, "larger: longer");
             expectWithinAbsoluteError (proc.getCurrentIR()->targetRT, bigger, bigger * 2.0e-3f);
 
-            proc.getShared().setHoldDecay (true);
+            proc.getShared().setKeptGroups (groupBit (ParamGroup::Decay));
             proc.selectPreset ("Rooms/01 Studio A", true);
             settle (proc);
             expect (! proc.isHallOn(), "a new preset switches the hall model off");
             expectWithinAbsoluteError (proc.getCurrentIR()->targetRT, bigger, bigger * 2.0e-3f, "a held decay keeps the hall's decay");
-            proc.getShared().setHoldDecay (false);
+            proc.getShared().setKeptGroups (0);
 
             setParam (proc, ParamID::hallOn, 1.0f);
             settle (proc);
