@@ -79,9 +79,7 @@ namespace ParamID
     inline constexpr const char* distOn        = "distOn";
     inline constexpr const char* distance      = "distance";
     inline constexpr const char* distMic       = "distMic";
-    inline constexpr const char* distWidthOn   = "distWidthOn";
     inline constexpr const char* distWidth     = "distWidth";
-    inline constexpr const char* distAlign     = "distAlign";
 }
 
 // Level controls use their minimum value as "off"

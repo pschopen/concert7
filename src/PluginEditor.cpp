@@ -10,14 +10,30 @@ using namespace juce;
 namespace
 {
     constexpr int kFaceHeight = 172;
-    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS", "DIRECT", "SPACE" };
+
+    /** Space page, in page coordinates, left to right: HALL above the DECAY it gives; DISTANCE as a large knob
+        with its two options stacked beside it; the DRY SIGNAL it sets, five knobs like the five on a die; the
+        top view. All small knobs sit on two rows (the middle of the die between them). */
+    namespace SpaceGrid
+    {
+        constexpr int knobW = 68, knobH = 66, bigW = 100, optionW = 72, dieW = 64;
+        constexpr int hallX = 8, hallW = 2 * knobW + 20;
+        constexpr int distX = hallX + hallW + 8, distW = 10 + bigW + 8 + optionW + 10;
+        constexpr int dryX = distX + distW + 8, dryW = 3 * dieW + 20;
+        constexpr int viewX = dryX + dryW + 8;
+        constexpr int topY = 8, topH = 88, bottomY = topY + topH + 8, bottomH = 188 - bottomY;
+        constexpr int row1 = 28, row2 = 116, rowMiddle = (row1 + row2) / 2;
+        constexpr int hallColumn (int i) { return hallX + 10 + i * knobW; }
+        constexpr int dieColumn (int i) { return dryX + 10 + i * dieW; }
+    }
+    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS", "SPACE" };
     const char* const kTabTooltips[] = {
         "Early reflections, late reverb, delay and stereo propagation",
         "Decay time of the lows and highs, separately",
         "Equalizer for the reverb signal (the dry signal is not affected)",
         "Modulation, Smooth and ducking",
-        "Tone, width and timing of the dry signal",
-        "Set the reverb by hall size, or place a dry source nearer or further away"
+        "Set the reverb by hall size, place a dry source nearer or further away, "
+        "and the tone, width and timing of the dry signal"
     };
 
     /** What a control does, for the end user. Knobs, toggles and combo boxes are looked up by their parameter. */
@@ -87,29 +103,30 @@ namespace
                                       "e.g. the band's reverb ducks under the lead vocal." },
             // direct
             { ParamID::directHighs, "Presence of the dry signal. Plus: closer and brighter. Minus: further away. "
-                                    "Set by the distance mode while SPACE > DISTANCE is on." },
+                                    "Set by DISTANCE while it is on." },
             { ParamID::directAir, "Damps the highest frequencies of the dry signal, as over a long distance through air. "
-                                  "Set by the distance mode while SPACE > DISTANCE is on." },
+                                  "Set by DISTANCE while it is on." },
             { ParamID::directWidth, "Stereo width of the dry signal. 100 % = unchanged, 0 % = mono. "
-                                    "Set by the distance mode while SPACE > DISTANCE is on." },
+                                    "Set by DISTANCE while it is on." },
             { ParamID::directDelay, "Delays the dry signal, e.g. to align a spot microphone with a main pair. "
-                                    "Set by the distance mode while SPACE > DISTANCE is on." },
+                                    "Set by DISTANCE while it is on." },
             { ParamID::directGap, "Delays the whole reverb, including the early reflections, against the dry signal. "
                                   "A larger gap makes the source sound closer. "
-                                  "Set by the distance mode while SPACE > DISTANCE is on." },
+                                  "Set by DISTANCE while it is on." },
             // space
             { ParamID::hallOn, "Sets the reverb by the size of the hall and its surfaces instead of DECAY. "
                                "Switching it on or off keeps the current sound." },
             { ParamID::hallVolume, String (CharPointer_UTF8 ("Size of the hall. Bigger = longer reverb "
                                                              "(about 16 000 m\xc2\xb3 = large concert hall).")) },
             { ParamID::hallAbsorption, "How much the surfaces absorb - from stone church (very reverberant) to studio (dry)." },
-            { ParamID::distOn, "Places the dry source nearer or further away in the hall; MIX and DIRECT follow automatically. "
+            { ParamID::distOn, "Places the dry source nearer or further away in the hall; MIX and the DRY SIGNAL controls follow automatically. "
                                "Switching it on or off keeps the current sound. Use it as an insert on a dry track." },
             { ParamID::distance, "Distance from the source to the listener. Further = more reverb, less presence." },
-            { ParamID::distWidthOn, "Narrows the dry signal to the width the source appears at this distance." },
-            { ParamID::distWidth, "Real width of the source (e.g. 2 m for a piano, 15 m for an orchestra). Only with NARROW." },
-            { ParamID::distAlign, "Delays the dry signal by the sound's travel time - for spot microphones against a main pair." },
-            { ParamID::distMic, "Distance from the spot microphone to the source. Only with TIME ALIGN." },
+            { ParamID::distWidth, "How wide the instrument or ensemble really is (e.g. 2 m for a piano, 15 m for an orchestra) - "
+                                "not the stereo width. Further away it covers a smaller angle, so the dry signal gets "
+                                "narrower. Off: the stereo image stays as it is." },
+            { ParamID::distMic, "For spot microphones against a main pair: how far the spot microphone was from the source. "
+                              "The dry signal is delayed by the sound's travel time from there to DISTANCE. Off: no delay." },
         };
         const auto it = tips.find (paramID);
         return it != tips.end() ? it->second : String();
@@ -268,38 +285,31 @@ MainPanel::MainPanel (Concert7Processor& p)
     duckSidechain->setTooltip (tooltipFor (ParamID::duckSidechain));
     ext.addAndMakeVisible (*duckSidechain);
 
-    // direct page: the dry signal and the gap before the reverb
-    auto& dir = pages[kDirectTab];
-    addKnob (knobs, dir, ParamID::directHighs, "HIGHS", true);
-    addKnob (knobs, dir, ParamID::directAir, "AIR");
-    addKnob (knobs, dir, ParamID::directWidth, "WIDTH");
-    addKnob (knobs, dir, ParamID::directDelay, "DELAY");
-    addKnob (knobs, dir, ParamID::directGap, "REVERB GAP");
-
-    // space page: hall model and distance mode
+    // space page: hall model, distance mode and the dry signal it drives (including the gap before the reverb)
     auto& dst = pages[kSpaceTab];
-    addKnob (knobs, dst, ParamID::hallVolume, "VOLUME");
+    addKnob (knobs, dst, ParamID::hallVolume, "SIZE");
     addKnob (knobs, dst, ParamID::hallAbsorption, "ABSORPTION");
     addKnob (knobs, dst, ParamID::distance, "DISTANCE");
-    addKnob (knobs, dst, ParamID::distWidth, "SRC WIDTH");
-    addKnob (knobs, dst, ParamID::distMic, "MIC DIST");
+    addKnob (knobs, dst, ParamID::distWidth, "SOURCE SIZE");
+    addKnob (knobs, dst, ParamID::distMic, "MIC DISTANCE");
+    addKnob (knobs, dst, ParamID::directHighs, "HIGHS", true);
+    addKnob (knobs, dst, ParamID::directAir, "AIR");
+    addKnob (knobs, dst, ParamID::directWidth, "WIDTH");
+    addKnob (knobs, dst, ParamID::directDelay, "DELAY");
+    addKnob (knobs, dst, ParamID::directGap, "REVERB GAP");
     hallOn = std::make_unique<ParamToggle> (state, ParamID::hallOn, "ON");
     distOn = std::make_unique<ParamToggle> (state, ParamID::distOn, "ON");
-    distAlign = std::make_unique<ParamToggle> (state, ParamID::distAlign, "TIME ALIGN");
-    distWidthOn = std::make_unique<ParamToggle> (state, ParamID::distWidthOn, "NARROW");
-    for (Component* c : std::initializer_list<Component*> { hallOn.get(), distOn.get(), distAlign.get(), distWidthOn.get() })
+    for (Component* c : std::initializer_list<Component*> { hallOn.get(), distOn.get() })
         dst.addAndMakeVisible (c);
     hallOn->setTooltip (tooltipFor (ParamID::hallOn));
     distOn->setTooltip (tooltipFor (ParamID::distOn));
-    distAlign->setTooltip (tooltipFor (ParamID::distAlign));
-    distWidthOn->setTooltip (tooltipFor (ParamID::distWidthOn));
     distanceView.setTooltip ("Top view of the hall: source, listener, first reflection and the critical distance "
                              "(where direct sound and reverb are equally loud).");
     dst.addAndMakeVisible (distanceView);
-    hallDecayLabel.setFont (labelFont (9.5f));
+    hallDecayLabel.setFont (uiFont (18.0f));
     hallDecayLabel.setJustificationType (Justification::centred);
-    hallDecayLabel.setColour (Label::textColourId, Colours::textDim);
-    hallDecayLabel.setTooltip ("The decay this hall gives.");
+    hallDecayLabel.setColour (Label::textColourId, Colours::lcdOn);
+    hallDecayLabel.setTooltip ("The decay this hall gives. While HALL is on, DECAY follows it.");
     dst.addAndMakeVisible (hallDecayLabel);
 
     tabButtons[0].setToggleState (true, dontSendNotification);
@@ -566,8 +576,6 @@ void MainPanel::timerCallback()
     // distance mode drives MIX and DIRECT (the greyed knobs show the values in effect);
     // its own controls only work while it is on
     const bool distance = processor.isDistanceOn();
-    const bool width = state.getRawParameterValue (ParamID::distWidthOn)->load() > 0.5f;
-    const bool align = state.getRawParameterValue (ParamID::distAlign)->load() > 0.5f;
     const bool hall = processor.isHallOn();
     const auto ds = processor.getDistanceState (false);
     for (auto& k : knobs)
@@ -601,8 +609,8 @@ void MainPanel::timerCallback()
             if (hall) k->clearDisplayOverride();
             else k->setDisplayOverride (v, pid == ParamID::hallVolume ? formatVolume (v) : formatAbsorption (v));
         }
-        else if (k->getParentComponent() == &pages[kSpaceTab])
-            k->setEnabled (distance && (pid != ParamID::distWidth || width) && (pid != ParamID::distMic || align));
+        else if (pid == ParamID::distance || pid == ParamID::distWidth || pid == ParamID::distMic)
+            k->setEnabled (distance);
         if (pid == ParamID::distance)
         {
             // double-click returns to the unchanged sound; while off, the knob shows where the mix sits
@@ -619,12 +627,16 @@ void MainPanel::timerCallback()
             }
         }
     }
-    for (Component* c : std::initializer_list<Component*> { distAlign.get(), distWidthOn.get() })
-        c->setEnabled (distance);
     if (currentTab == kSpaceTab) distanceView.repaint();
+    if (distance != dryAuto || hall != hallAuto)
+    {
+        dryAuto = distance;
+        hallAuto = hall;
+        repaint();   // the status lights of DRY SIGNAL and DECAY
+    }
 
     // the decay the hall gives (or, while the hall model is off, the decay the hall matches)
-    const auto decayText = "DECAY " + formatSeconds (processor.getEffectiveDecay());
+    const auto decayText = formatSeconds (processor.getEffectiveDecay());
     if (hallDecayLabel.getText() != decayText)
         hallDecayLabel.setText (decayText, dontSendNotification);
     hallDecayLabel.setEnabled (hall);
@@ -723,17 +735,42 @@ void MainPanel::paint (Graphics& g)
         g.setFont (uiFont (11.0f));
         g.drawText ("-" + String (red, 1) + " dB", gr.reduced (6.0f), Justification::bottomLeft);
     }
-    else if (currentTab == kDirectTab)
-    {
-        auto& dir = pages[kDirectTab];
-        frame (dir, { 8, 8, 360, 180 }, "TONE");
-        frame (dir, { 376, 8, 200, 180 }, "IMAGE");
-        frame (dir, { 584, 8, 360, 180 }, "TIMING");
-    }
     else if (currentTab == kSpaceTab)
     {
-        frame (pages[kSpaceTab], { 8, 8, 208, 180 }, "HALL");
-        frame (pages[kSpaceTab], { 224, 8, 300, 180 }, "DISTANCE");
+        using namespace SpaceGrid;
+        auto& dst = pages[kSpaceTab];
+        frame (dst, { hallX, topY, hallW, topH }, "HALL");
+        frame (dst, { hallX, bottomY, hallW, bottomH }, "DECAY");
+        frame (dst, { distX, topY, distW, 180 }, "DISTANCE");
+        frame (dst, { dryX, topY, dryW, 180 }, "DRY SIGNAL");
+        const auto origin = dst.getPosition().toFloat();
+
+        // in the title row of what a section sets: lit while the section sets it
+        auto status = [&] (int x, int y, int w, const String& text, bool on) {
+            const auto font = labelFont (9.0f);
+            const auto r = Rectangle<float> ((float) (x + 10), (float) y + 6.0f, (float) (w - 20), 12.0f) + origin;
+            const float textX = r.getRight() - (float) GlyphArrangement::getStringWidthInt (font, text);
+            const auto led = Rectangle<float> (6.0f, 6.0f).withCentre ({ textX - 9.0f, r.getCentreY() });
+            if (on)
+            {
+                g.setColour (Colours::ledOn.withAlpha (0.35f));
+                g.fillEllipse (led.expanded (3.0f));
+            }
+            g.setColour (on ? Colours::ledOn : Colours::ledOff);
+            g.fillEllipse (led);
+            g.setColour (on ? Colours::text : Colours::textFaint);
+            g.setFont (font);
+            g.drawText (text, r, Justification::centredRight);
+        };
+        status (hallX, bottomY, hallW, "SET BY HALL", hallAuto);
+        status (dryX, topY, dryW, "SET BY DISTANCE", dryAuto);
+
+        // the decay, as a readout (not a control)
+        const auto lcd = hallDecayLabel.getBounds().toFloat() + origin;
+        g.setColour (Colours::lcdBack);
+        g.fillRoundedRectangle (lcd, 5.0f);
+        g.setColour (Colours::outline);
+        g.drawRoundedRectangle (lcd.reduced (0.5f), 5.0f, 1.0f);
     }
 }
 
@@ -854,30 +891,40 @@ void MainPanel::resized()
     small (ext, ParamID::smooth, { 789, 34, 100, 130 });
     duckSidechain->setBounds (600, 160 - 8, 110, 24);
 
-    // direct page
-    auto& dir = pages[kDirectTab];
-    small (dir, ParamID::directHighs, { 68, 34, 100, 130 });
-    small (dir, ParamID::directAir, { 208, 34, 100, 130 });
-    small (dir, ParamID::directWidth, { 426, 34, 100, 130 });
-    small (dir, ParamID::directDelay, { 644, 34, 100, 130 });
-    small (dir, ParamID::directGap, { 784, 34, 100, 130 });
+    // space page (see SpaceGrid): HALL is size and absorption, below it the DECAY they give. DISTANCE is the
+    // main knob, its two options (off at the start of the knob) beside it. The DRY SIGNAL it sets: tone on top,
+    // timing below, the image in the middle
+    {
+        using namespace SpaceGrid;
+        auto& dst = pages[kSpaceTab];
+        auto cell = [&] (const char* id, int x, int y, int w, int h, float textHeight = 12.0f) {
+            for (auto& k : knobs)
+                if (k->getParamID() == id)
+                {
+                    k->captionHeight = textHeight;
+                    k->valueHeight = textHeight;
+                    k->setBounds (x, y, w, h);
+                    k->resized();
+                }
+        };
+        hallOn->setBounds (hallX + hallW - 8 - 60, topY + 1, 60, 18);
+        cell (ParamID::hallVolume, hallColumn (0), row1, knobW, knobH);
+        cell (ParamID::hallAbsorption, hallColumn (1), row1, knobW, knobH);
+        hallDecayLabel.setBounds (hallX + 20, bottomY + 26, hallW - 40, bottomH - 36);
 
-    // space page: each section has its switch in the title row, one row of equal knobs and,
-    // below a knob, what belongs to it
-    auto& dst = pages[kSpaceTab];
-    const int switchY = 12, knobY = 40, knobW = 92, knobH = 112, belowY = 156;
-    hallOn->setBounds (8 + 208 - 104, switchY, 96, 22);
-    small (dst, ParamID::hallVolume, { 20, knobY, knobW, knobH });
-    small (dst, ParamID::hallAbsorption, { 20 + knobW, knobY, knobW, knobH });
-    hallDecayLabel.setBounds (20, belowY, 2 * knobW, 22);
+        distOn->setBounds (distX + distW - 8 - 60, topY + 1, 60, 18);
+        const int bigH = bigW + 30;
+        cell (ParamID::distance, distX + 10, (row1 + row2 + knobH - bigH) / 2, bigW, bigH, 15.0f);
+        cell (ParamID::distWidth, distX + 10 + bigW + 8, row1, optionW, knobH);
+        cell (ParamID::distMic, distX + 10 + bigW + 8, row2, optionW, knobH);
 
-    distOn->setBounds (224 + 300 - 104, switchY, 96, 22);
-    small (dst, ParamID::distance, { 236, knobY, knobW, knobH });
-    small (dst, ParamID::distWidth, { 236 + knobW, knobY, knobW, knobH });
-    small (dst, ParamID::distMic, { 236 + 2 * knobW, knobY, knobW, knobH });
-    distWidthOn->setBounds (236 + knobW + 6, belowY, knobW - 12, 22);
-    distAlign->setBounds (236 + 2 * knobW + 6, belowY, knobW - 12, 22);
-    distanceView.setBounds (532, 8, dst.getWidth() - 540, 180);
+        cell (ParamID::directHighs, dieColumn (0), row1, dieW, knobH);
+        cell (ParamID::directAir, dieColumn (2), row1, dieW, knobH);
+        cell (ParamID::directWidth, dieColumn (1), rowMiddle, dieW, knobH);
+        cell (ParamID::directDelay, dieColumn (0), row2, dieW, knobH);
+        cell (ParamID::directGap, dieColumn (2), row2, dieW, knobH);
+        distanceView.setBounds (viewX, 8, dst.getWidth() - viewX - 8, 180);
+    }
 
     if (welcome != nullptr)
         welcome->setBounds (getLocalBounds());

@@ -122,8 +122,8 @@ DistanceResult computeDistance (const DistanceModel& m)
     res.criticalDistance = distanceForDrr (0.0f, T, V);
     res.gapChangeMs = initialGapMs (r, V) - initialGapMs (r0, V);
     res.airMetres = std::max (0.0f, r - r0);
-    if (m.timeAlign)
-        res.directDelayMs = 1000.0f * std::max (0.0f, r - std::max (0.05f, m.micDistance)) / kSpeedOfSound;
+    if (m.micDistance > 0.0f)
+        res.directDelayMs = 1000.0f * std::max (0.0f, r - m.micDistance) / kSpeedOfSound;
 
     res.presenceDb = jlimit (kPresenceMinDb, kPresenceMaxDb, -kPresenceDbPerDoubling * std::log2 (r / r0));
 

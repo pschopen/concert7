@@ -12,12 +12,13 @@
     house, studio) set the decay after Eyring's formula; DECAY is greyed out and shows the result
   - Distance: a calibrated depth control for dry sources (0.5 – 60 m). The direct to reverberant ratio follows
     Barron's revised theory for concert halls (through MIX), the direct sound loses presence (near field timbre)
-    and gets air absorption (ISO 9613-1), and the reverb starts later the closer the source is. Optional source width
-    (narrowed around the source's own panorama position) and time alignment for spot microphones. MIX and the DIRECT
-    controls are greyed out and show the values in effect; switching it off hands them back. Real time, without
-    rebuilding the impulse response
-- New DIRECT tab for the dry signal: HIGHS (shelf at 3 kHz), AIR (air absorption, loss at 10 kHz), WIDTH (narrowed
-  around the source's own position), DELAY, and REVERB GAP (the whole reverb starts later than the direct sound)
+    and gets air absorption (ISO 9613-1), and the reverb starts later the closer the source is. Optional source size
+    (narrows the image around the source's own panorama position) and microphone distance (time alignment for spot
+    microphones), both off at the start of their knob. MIX and the DRY SIGNAL controls are greyed out and show the
+    values in effect; switching it off hands them back. Real time, without rebuilding the impulse response
+- New DRY SIGNAL controls, in the SPACE tab below the distance controls that drive them: HIGHS (shelf at 3 kHz),
+  AIR (air absorption, loss at 10 kHz), WIDTH (narrowed around the source's own position), DELAY and REVERB GAP
+  (the whole reverb starts later than the direct sound)
 - Every control, tab and preset category now has a tooltip that explains in plain words what it does
 - Choosing a preset, also the current one again, resets all controls to their defaults and DECAY to the preset's
   own decay ("Hold decay when changing presets" still keeps the decay, a hall model's included). Hall model and

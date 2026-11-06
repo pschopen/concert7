@@ -54,7 +54,7 @@ private:
     StereoMeter inMeter { "IN" }, outMeter { "OUT" };
 
     // tabs
-    static constexpr int kNumTabs = 6, kDirectTab = 4, kSpaceTab = 5;
+    static constexpr int kNumTabs = 5, kSpaceTab = 4;
     std::array<juce::TextButton, kNumTabs> tabButtons;
     juce::TextButton setupButton { "SETUP" };
     std::array<juce::Component, kNumTabs> pages;
@@ -70,9 +70,11 @@ private:
     EQView eqView;
 
     // space page
-    std::unique_ptr<ParamToggle> hallOn, distOn, distAlign, distWidthOn;
+    std::unique_ptr<ParamToggle> hallOn, distOn;
     DistanceView distanceView;
     juce::Label hallDecayLabel;
+    bool dryAuto = false;   // the dry signal follows the distance mode
+    bool hallAuto = false;  // DECAY follows the hall model
 
     std::unique_ptr<WelcomeOverlay> welcome;
     std::unique_ptr<juce::FileChooser> chooser;

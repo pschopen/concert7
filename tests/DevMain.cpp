@@ -7,7 +7,7 @@
 //   concert7-dev render   --in IN.wav --out OUT.wav [--irs DIR] [--preset ID] [--set id=value ...]
 //                         [--block N] [--tail SECONDS] [--sr RATE]
 //   concert7-dev ir       --out IR.wav [--preset ID] [--set id=value ...] [--sr RATE]
-//   concert7-dev snapshot --out UI.png [--tab 0..5] [--welcome] [--preset ID] [--scale S]
+//   concert7-dev snapshot --out UI.png [--tab 0..4] [--welcome] [--preset ID] [--scale S]
 //   concert7-dev bench    [--preset ID] [--seconds S] [--block N] [--set ...]
 //   concert7-dev presets  [--irs DIR]            (lists presets with their analysed reverb times)
 //   concert7-dev analyze  --preset ID [--sr RATE] (per band analysis of one preset)

@@ -313,8 +313,7 @@ DistanceModel Concert7Processor::makeDistanceModel (bool distanceOn) const
     m.rt60 = getEffectiveDecay();
     m.volume = getHallVolume();
     m.micDistance = param (ParamID::distMic);
-    m.sourceWidth = param (ParamID::distWidthOn) > 0.5f ? param (ParamID::distWidth) : 0.0f;
-    m.timeAlign = param (ParamID::distAlign) > 0.5f;
+    m.sourceWidth = param (ParamID::distWidth);
     if (distanceOn)
     {
         const float pending = pendingDistance.load();

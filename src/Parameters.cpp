@@ -69,6 +69,16 @@ namespace
             [] (float start, float end, float v) { return jlimit (start, end, v); });
     }
 
+    /** Off (0) over the first few percent of the travel, then logarithmic from lo to hi. */
+    NormalisableRange<float> logRangeWithOff (float lo, float hi)
+    {
+        constexpr float offSpan = 0.04f;
+        return NormalisableRange<float> (0.0f, hi,
+            [lo] (float, float end, float v) { return v < offSpan ? 0.0f : lo * std::pow (end / lo, (v - offSpan) / (1.0f - offSpan)); },
+            [lo] (float, float end, float v) { return v < lo ? 0.0f : offSpan + (1.0f - offSpan) * std::log (v / lo) / std::log (end / lo); },
+            [lo] (float, float end, float v) { return v < 0.5f * lo ? 0.0f : jlimit (lo, end, v); });
+    }
+
     NormalisableRange<float> skewedRange (float lo, float hi, float centre, float step = 0.0f)
     {
         NormalisableRange<float> r (lo, hi, step);
@@ -184,12 +194,12 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (floatParam (ParamID::hallAbsorption, "Hall Absorption", skewedRange (0.03f, 0.9f, 0.27f), 0.27f, "",
                             [] (float v, int) { return formatAbsorption (v); }));
     auto metres = [] (float v, int) { return formatMetres (v); };
+    auto metresOrOff = [] (float v, int) { return v <= 0.0f ? String ("Off") : formatMetres (v); };
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::distOn, 1 }, "Distance On", false));
     layout.add (floatParam (ParamID::distance, "Distance", logRange (0.5f, 60.0f), 8.0f, "m", metres));
-    layout.add (floatParam (ParamID::distMic, "Mic Distance", logRange (0.1f, 10.0f), 1.0f, "m", metres));
-    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::distWidthOn, 1 }, "Source Width On", false));
-    layout.add (floatParam (ParamID::distWidth, "Source Width", logRange (0.2f, 40.0f), 2.0f, "m", metres));
-    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::distAlign, 1 }, "Time Align", false));
+    // optional, off at the start of the knob: the real width of the source, the distance of a spot microphone
+    layout.add (floatParam (ParamID::distWidth, "Source Size", logRangeWithOff (0.2f, 40.0f), 0.0f, "m", metresOrOff));
+    layout.add (floatParam (ParamID::distMic, "Mic Distance", logRangeWithOff (0.1f, 10.0f), 0.0f, "m", metresOrOff));
 
     return layout;
 }

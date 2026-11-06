@@ -80,11 +80,10 @@ struct DistanceModel
 {
     float distance = 8.0f;           // source to listener, m
     float referenceDistance = 8.0f;  // distance at which the sound is the unchanged preset, m
-    float micDistance = 1.0f;        // distance the dry signal was recorded at (time align), m
+    float micDistance = 0.0f;        // m, distance the dry signal was recorded at; <= 0: no time alignment
     float volume = 0.0f;             // hall volume, m^3 (<= 0: estimated from rt60)
     float rt60 = 2.0f;               // mid band reverb time, s
     float sourceWidth = 0.0f;        // m; <= 0 keeps the stereo image of the input
-    bool timeAlign = false;          // delay the result by the propagation time
 };
 
 struct DistanceResult
@@ -93,7 +92,7 @@ struct DistanceResult
     float drrChangeDb = 0.0f;         // change of the direct to reverberant ratio against the reference
     float criticalDistance = 0.0f;    // m, where direct and reflected energy are equal (model)
     float gapChangeMs = 0.0f;         // change of the gap before the first reflection
-    float directDelayMs = 0.0f;       // propagation delay (time align only)
+    float directDelayMs = 0.0f;       // propagation delay (with a mic distance only)
     float widthFactor = 1.0f;         // side signal gain of the direct sound
     float airMetres = 0.0f;           // extra path the air absorption applies to
     float presenceDb = 0.0f;          // near field timbre: high shelf gain of the direct sound

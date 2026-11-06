@@ -173,7 +173,6 @@ public:
             DistanceModel m;
             m.volume = 10000.0f;
             m.referenceDistance = 2.0f;
-            m.micDistance = 1.0f;
             m.distance = 20.0f;
             m.sourceWidth = 0.0f;
             expectEquals (computeDistance (m).widthFactor, 1.0f, "no width set: image unchanged");
@@ -181,9 +180,9 @@ public:
             const auto d = computeDistance (m);
             expectWithinAbsoluteError (d.widthFactor, std::atan (0.1f) / std::atan (1.0f), 1.0e-4f);
             expectWithinAbsoluteError (d.airMetres, 18.0f, 1.0e-4f);
-            expectEquals (d.directDelayMs, 0.0f);
+            expectEquals (d.directDelayMs, 0.0f, "no mic distance set: no delay");
             expectLessThan (d.gapChangeMs, 0.0f, "further away: the first reflection comes sooner");
-            m.timeAlign = true;
+            m.micDistance = 1.0f;
             expectWithinAbsoluteError (computeDistance (m).directDelayMs, 19000.0f / kSpeedOfSound, 0.01f, "from the microphone");
             m.distance = 1.0f;
             expectEquals (computeDistance (m).airMetres, 0.0f, "closer than the reference: no air to remove");
