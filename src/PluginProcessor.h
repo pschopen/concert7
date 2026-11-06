@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include "EditHistory.h"
 #include "Parameters.h"
 #include "SharedState.h"
 #include "dsp/ConvolutionEngine.h"
@@ -69,6 +70,24 @@ public:
     void selectPreset (const juce::String& presetId, bool userAction);
     void selectPresetByOffset (int delta);
     juce::String getPresetId() const;
+
+    /** Undo / redo of the user's edits (kept while the editor is closed, not stored with the project). */
+    EditHistory& getHistory() { return *history; }
+    /** True while the processor still has values to hand over after an edit (decay of a new preset, the
+        values the hall model or the distance mode write when switched). */
+    bool hasPendingHandover() const;
+    /** Undo / redo: sets parameters (0..1) and the impulse response as they were. Nothing is handed over,
+        DECAY is not taken from the preset. Message thread. */
+    void restoreValues (const std::vector<std::pair<juce::RangedAudioParameter*, float>>& values,
+                        const juce::String& presetId, float distanceReference);
+    float getDistanceReference() const { return distanceReference.load(); }
+
+    /** A/B comparison: two complete settings (impulse response included), both stored with the project.
+        Choosing the other slot keeps the current one in its slot. */
+    int getABSlot() const { return abSlot; }
+    void selectABSlot (int slot);
+    /** Copies the current settings into the other slot. */
+    void copyToOtherABSlot();
 
     /** Status for the user interface. */
     struct Status
@@ -141,6 +160,9 @@ private:
 
     juce::SharedResourcePointer<SharedState> shared;
     juce::AudioProcessorValueTreeState apvts;
+    std::unique_ptr<EditHistory> history;
+    std::array<juce::ValueTree, 2> abSlots;   // the slot not in use (the one in use is the current state)
+    int abSlot = 0;
 
     ConvolutionEngine engine;
     PostEQ eq;
@@ -181,6 +203,17 @@ private:
     juce::String presetId;
     Status status;
     std::shared_ptr<SourceIR> source, patternSource;
+    // the impulse responses used last: switching back (A/B, undo, the previous preset) skips loading and design
+    struct RecentBuild
+    {
+        juce::String presetId, patternId;
+        double rate = 0.0;
+        DesignParams params;
+        std::shared_ptr<const BuiltIR> ir;
+    };
+    std::vector<std::shared_ptr<SourceIR>> recentSources;
+    std::vector<RecentBuild> recentBuilds;
+    static constexpr size_t kRecentSources = 3, kRecentBuilds = 2;
     DesignParams lastBuiltParams;
     juce::String lastBuiltPreset, lastBuiltPattern;
     double lastBuiltRate = 0.0;

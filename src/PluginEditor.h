@@ -23,6 +23,7 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;
 
     void showWelcome (bool show);
     void showTab (int index);
@@ -58,6 +59,8 @@ private:
     static constexpr int kNumTabs = 5, kSpaceTab = 4;
     std::array<juce::TextButton, kNumTabs> tabButtons;
     juce::TextButton setupButton { "SETUP" };
+    juce::TextButton undoButton { "UNDO" }, redoButton { "REDO" }, slotA { "A" }, slotB { "B" }, copySlot { "A > B" };
+    void updateHistoryButtons();
     std::array<juce::Component, kNumTabs> pages;
     int currentTab = 0;
 

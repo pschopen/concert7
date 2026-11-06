@@ -50,6 +50,7 @@ Concert7Processor::Concert7Processor()
         if (auto* withId = dynamic_cast<AudioProcessorParameterWithID*> (p))
             apvts.addParameterListener (withId->paramID, this);
 
+    history = std::make_unique<EditHistory> (*this);
     shared->addChangeListener (this);
     presetId = shared->getDefaultPresetId();
     userPresetChange = true; // first preset starts at its native decay
@@ -66,6 +67,7 @@ Concert7Processor::~Concert7Processor()
     builder->signalThreadShouldExit();
     builder->trigger();
     builder->stopThread (5000);
+    history.reset();
     for (auto* p : getParameters())
         if (auto* withId = dynamic_cast<AudioProcessorParameterWithID*> (p))
             apvts.removeParameterListener (withId->paramID, this);
@@ -479,6 +481,8 @@ void Concert7Processor::buildNow()
     {
         source.reset();
         patternSource.reset();
+        recentSources.clear();
+        recentBuilds.clear();
         lastBuiltPreset.clear();
     }
 
@@ -515,13 +519,27 @@ void Concert7Processor::buildNow()
             setStatusMessage ("Preset not found", false);
             return;
         }
-        setStatusMessage ("Loading...", true);
-        String error;
-        auto loaded = loadSourceIR (preset, sr, error);
+        std::shared_ptr<SourceIR> loaded;
+        for (auto& recent : recentSources)
+            if (recent->presetId == id && std::abs (recent->sampleRate - sr) < 0.5)
+                loaded = recent;
         if (loaded == nullptr)
         {
-            setStatusMessage (error, false);
-            return;
+            setStatusMessage ("Loading...", true);
+            String error;
+            loaded = loadSourceIR (preset, sr, error);
+            if (loaded == nullptr)
+            {
+                setStatusMessage (error, false);
+                return;
+            }
+        }
+        if (source != nullptr)
+        {
+            recentSources.erase (std::remove (recentSources.begin(), recentSources.end(), loaded), recentSources.end());
+            recentSources.erase (std::remove (recentSources.begin(), recentSources.end(), source), recentSources.end());
+            recentSources.insert (recentSources.begin(), source);
+            if (recentSources.size() > kRecentSources) recentSources.resize (kRecentSources);
         }
         source = loaded;
         const ScopedLock sl (statusLock);
@@ -566,9 +584,19 @@ void Concert7Processor::buildNow()
         return;
     }
 
-    auto built = designIR (*source, patternSource.get(), dp);
+    std::shared_ptr<const BuiltIR> built;
+    for (auto& recent : recentBuilds)
+        if (recent.presetId == id && recent.patternId == patternId && std::abs (recent.rate - sr) < 0.5 && recent.params == dp)
+            built = recent.ir;
+    if (built == nullptr)
+        built = designIR (*source, patternSource.get(), dp);
     if (! engine.loadIR (built, [this] { return abortBuild.load() || builder->threadShouldExit(); }))
         return;
+    if (auto previous = std::find_if (recentBuilds.begin(), recentBuilds.end(), [&] (auto& r) { return r.ir == built; });
+        previous != recentBuilds.end())
+        recentBuilds.erase (previous);
+    recentBuilds.insert (recentBuilds.begin(), { id, patternId, sr, dp, built });
+    if (recentBuilds.size() > kRecentBuilds) recentBuilds.resize (kRecentBuilds);
 
     irMidEnergy = built->midEnergy;
     irMidEnergyDiagonal = built->midEnergyDiagonal;
@@ -718,6 +746,12 @@ void Concert7Processor::changeListenerCallback (ChangeBroadcaster*)
 //==============================================================================
 void Concert7Processor::selectPreset (const String& id, bool userAction)
 {
+    const bool undoable = userAction && MessageManager::existsAndIsCurrentThread();
+    if (undoable)
+    {
+        IRPreset p;
+        history->beginAction (shared->getPreset (id, p) ? p.category + " " + p.displayNumber() + " " + p.name : id);
+    }
     {
         const ScopedLock sl (statusLock);
         presetId = id;
@@ -729,6 +763,63 @@ void Concert7Processor::selectPreset (const String& id, bool userAction)
     }
     requestRebuild();
     sendChangeMessage();
+    if (undoable)
+        history->endAction();
+}
+
+bool Concert7Processor::hasPendingHandover() const
+{
+    {
+        const ScopedLock sl (statusLock);
+        if (pendingNativeDecay > 0.0f) return true;
+    }
+    return (userPresetChange.load() && prepared.load() && shared->hasLibrary()) || pendingDistance.load() > 0.0f
+           || handbackPending.load() || pendingDecay.load() > 0.0f || pendingHallVolume.load() > 0.0f || isUpdatePending();
+}
+
+void Concert7Processor::restoreValues (const std::vector<std::pair<RangedAudioParameter*, float>>& values,
+                                       const String& id, float reference)
+{
+    pendingDistance = -1.0f;
+    pendingHallVolume = -1.0f;
+    pendingHallAbsorption = -1.0f;
+    pendingDecay = -1.0f;
+    handbackPending = false;
+    restoringState = true;
+    for (auto [p, v] : values)
+        if (p->getValue() != v)
+            p->setValueNotifyingHost (v);
+    restoringState = false;
+    distanceReference = reference;
+    {
+        const ScopedLock sl (statusLock);
+        presetId = id;
+        pendingNativeDecay = -1.0f;
+    }
+    userPresetChange = false;
+    requestRebuild();
+    sendChangeMessage();
+}
+
+void Concert7Processor::selectABSlot (int slot)
+{
+    slot = jlimit (0, 1, slot);
+    if (slot == abSlot) return;
+    auto current = createStateTree();
+    // the first time the other slot starts as a copy; each slot has its own undo history
+    const auto target = abSlots[(size_t) slot].isValid() ? abSlots[(size_t) slot] : current;
+    history->flush();
+    applyStateTree (target);
+    abSlots[(size_t) abSlot] = current;
+    abSlots[(size_t) slot] = {};
+    abSlot = slot;
+    history->useSlot (slot);
+    sendChangeMessage();
+}
+
+void Concert7Processor::copyToOtherABSlot()
+{
+    abSlots[(size_t) (1 - abSlot)] = createStateTree();
 }
 
 void Concert7Processor::resetParameters()
@@ -860,7 +951,15 @@ void Concert7Processor::applyStateTree (const ValueTree& tree, GroupMask keep)
 
 void Concert7Processor::getStateInformation (MemoryBlock& destData)
 {
-    if (auto xml = createStateTree().createXml())
+    auto state = createStateTree();
+    state.setProperty ("abSlot", abSlot, nullptr);
+    if (auto other = abSlots[(size_t) (1 - abSlot)]; other.isValid())
+    {
+        ValueTree slot ("OtherABSlot");
+        slot.appendChild (other.createCopy(), nullptr);
+        state.appendChild (slot, nullptr);
+    }
+    if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
 
@@ -868,7 +967,17 @@ void Concert7Processor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (apvts.state.getType()))
-            applyStateTree (ValueTree::fromXml (*xml));
+        {
+            auto tree = ValueTree::fromXml (*xml);
+            abSlot = jlimit (0, 1, (int) tree.getProperty ("abSlot", 0));
+            if (MessageManager::existsAndIsCurrentThread())
+                history->useSlot (abSlot);
+            abSlots = {};
+            const auto other = tree.getChildWithName ("OtherABSlot");
+            if (other.getNumChildren() > 0)
+                abSlots[(size_t) (1 - abSlot)] = other.getChild (0).createCopy();
+            applyStateTree (tree);
+        }
 }
 
 AudioProcessorEditor* Concert7Processor::createEditor()

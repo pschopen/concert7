@@ -209,6 +209,25 @@ MainPanel::MainPanel (Concert7Processor& p)
         addAndMakeVisible (b);
         addChildComponent (pages[(size_t) i]);
     }
+    // undo / redo and A/B
+    undoButton.onClick = [this] { processor.getHistory().undo(); updateHistoryButtons(); };
+    redoButton.onClick = [this] { processor.getHistory().redo(); updateHistoryButtons(); };
+    slotA.onClick = [this] { processor.selectABSlot (0); updateHistoryButtons(); };
+    slotB.onClick = [this] { processor.selectABSlot (1); updateHistoryButtons(); };
+    copySlot.onClick = [this] { processor.copyToOtherABSlot(); };
+    slotA.setTooltip ("Settings A. A and B hold two complete settings (impulse response included) to compare; "
+                      "switching keeps the other one as you left it.");
+    slotB.setTooltip ("Settings B. The first time you switch to B it starts as a copy of A.");
+    for (auto* b : { &undoButton, &redoButton, &slotA, &slotB, &copySlot })
+    {
+        b->getProperties().set ("fontHeight", 10.5f);
+        addAndMakeVisible (*b);
+    }
+    for (auto* b : { &slotA, &slotB })
+        b->getProperties().set ("led", true);
+    setWantsKeyboardFocus (true); // Cmd/Ctrl+Z, Shift+Cmd+Z / Ctrl+Y
+    updateHistoryButtons();
+
     setupButton.onClick = [this] { showSetupMenu(); };
     setupButton.setTooltip ("Impulse response library, interface size, settings kept on preset change, reset");
     addAndMakeVisible (setupButton);
@@ -394,6 +413,46 @@ void MainPanel::editNextKnob (Knob& from, bool backwards)
     }
 }
 
+void MainPanel::updateHistoryButtons()
+{
+    auto& h = processor.getHistory();
+    const bool canUndo = h.canUndo(), canRedo = h.canRedo();
+    undoButton.setEnabled (canUndo);
+    redoButton.setEnabled (canRedo);
+    undoButton.setTooltip (canUndo ? "Undo " + h.getUndoName() + " (Cmd/Ctrl+Z)" : String ("Nothing to undo"));
+    redoButton.setTooltip (canRedo ? "Redo " + h.getRedoName() + " (Shift+Cmd+Z / Ctrl+Y)" : String ("Nothing to redo"));
+    const int slot = processor.getABSlot();
+    slotA.setToggleState (slot == 0, dontSendNotification);
+    slotB.setToggleState (slot == 1, dontSendNotification);
+    const auto copyText = slot == 0 ? "A > B" : "B > A";
+    if (copySlot.getButtonText() != copyText || copySlot.getTooltip().isEmpty())
+    {
+        copySlot.setButtonText (copyText);
+        copySlot.setTooltip (slot == 0 ? "Copies the current settings to B" : "Copies the current settings to A");
+    }
+}
+
+bool MainPanel::keyPressed (const KeyPress& key)
+{
+    const auto mods = key.getModifiers();
+    const bool z = key.getKeyCode() == 'Z' || key.getKeyCode() == 'z';
+    const bool y = key.getKeyCode() == 'Y' || key.getKeyCode() == 'y';
+    if (mods.isCommandDown() && z)
+    {
+        if (mods.isShiftDown()) processor.getHistory().redo();
+        else processor.getHistory().undo();
+        updateHistoryButtons();
+        return true;
+    }
+    if (mods.isCommandDown() && y)
+    {
+        processor.getHistory().redo();
+        updateHistoryButtons();
+        return true;
+    }
+    return false; // everything else goes to the host (space bar ...)
+}
+
 void MainPanel::touch (Knob& k)
 {
     lastTouched = &k;
@@ -572,6 +631,8 @@ void MainPanel::timerCallback()
 
     const auto status = processor.getStatus();
     display.setStatus (status, processor.getShared().hasLibrary());
+
+    updateHistoryButtons();
 
     // padlocks on the knobs of kept groups (the setting is shared by all instances)
     const auto kept = processor.getShared().getKeptGroups();
@@ -876,8 +937,13 @@ void MainPanel::resized()
     // tabs
     const int tabY = mainArea.getBottom() + 10;
     for (int i = 0; i < kNumTabs; ++i)
-        tabButtons[(size_t) i].setBounds (12 + i * 128, tabY, 124, 28);
-    setupButton.setBounds (kWidth - 12 - 110, tabY, 110, 28);
+        tabButtons[(size_t) i].setBounds (12 + i * 116, tabY, 112, 28);
+    undoButton.setBounds (602, tabY, 52, 28);
+    redoButton.setBounds (658, tabY, 52, 28);
+    slotA.setBounds (724, tabY, 44, 28);
+    slotB.setBounds (772, tabY, 44, 28);
+    copySlot.setBounds (820, tabY, 52, 28);
+    setupButton.setBounds (kWidth - 12 - 104, tabY, 104, 28);
     pageArea = { 12, tabY + 32, kWidth - 24, kHeight - (tabY + 32) - 10 };
     for (auto& p : pages)
         p.setBounds (pageArea.reduced (8, 0).withTrimmedTop (2));

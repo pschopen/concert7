@@ -160,6 +160,129 @@ public:
             expect (proc.getShared().isKept (ParamGroup::Ducker) && ! proc.getShared().isKept (ParamGroup::EQ));
             proc.getShared().setKeptGroups (0);
         }
+
+        runHistoryTests();
+    }
+
+    /** What a control does: a value set as a gesture. */
+    static void edit (Concert7Processor& p, const char* id, float value)
+    {
+        auto* prm = p.getAPVTS().getParameter (id);
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost (prm->convertTo0to1 (value));
+        prm->endChangeGesture();
+    }
+
+    void runHistoryTests()
+    {
+        Concert7Processor proc;
+        auto& h = proc.getHistory();
+
+        beginTest ("undo / redo: a gesture is one step");
+        expect (! h.canUndo());
+        edit (proc, ParamID::mix, 60.0f);
+        h.flush();
+        expect (h.canUndo() && ! h.canRedo());
+        expectEquals (h.getUndoName(), String ("Mix"));
+        h.undo();
+        expectWithinAbsoluteError (get (proc, ParamID::mix), 30.0f, 0.01f);
+        expect (h.canRedo());
+        h.redo();
+        expectWithinAbsoluteError (get (proc, ParamID::mix), 60.0f, 0.01f);
+
+        beginTest ("undo / redo: host automation during an edit is left alone");
+        {
+            auto* mix = proc.getAPVTS().getParameter (ParamID::mix);
+            mix->beginChangeGesture();
+            mix->setValueNotifyingHost (mix->convertTo0to1 (70.0f));
+            set (proc, ParamID::gain, 6.0f);     // automation: no gesture
+            mix->setValueNotifyingHost (mix->convertTo0to1 (80.0f));
+            mix->endChangeGesture();
+            h.flush();
+            h.undo();
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 60.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::gain), 6.0f, 0.01f);
+            set (proc, ParamID::gain, 0.0f);
+        }
+
+        beginTest ("undo / redo: quick edits close as one step, after a moment of quiet");
+        {
+            edit (proc, ParamID::predelay, 10.0f);
+            edit (proc, ParamID::predelay, 20.0f);
+            MessageManager::getInstance()->runDispatchLoopUntil (EditHistory::kQuietMs + 200);
+            edit (proc, ParamID::predelay, 30.0f);
+            h.flush();
+            h.undo();
+            expectWithinAbsoluteError (get (proc, ParamID::predelay), 20.0f, 0.01f);
+            h.undo();
+            expectWithinAbsoluteError (get (proc, ParamID::predelay), 0.0f, 0.01f);
+        }
+
+        beginTest ("undo / redo: choosing a preset is one step with every value it reset");
+        {
+            edit (proc, ParamID::eqMidGain, 4.0f);
+            edit (proc, ParamID::modDepth, 50.0f);
+            h.flush();
+            proc.selectPreset (proc.getPresetId(), true);
+            h.flush();
+            expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), 0.0f, 0.01f);
+            h.undo();
+            expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), 4.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::modDepth), 50.0f, 0.01f);
+            h.redo();
+            expectWithinAbsoluteError (get (proc, ParamID::modDepth), 0.0f, 0.01f);
+        }
+
+        beginTest ("undo / redo: switching the hall model takes back the values it handed over");
+        {
+            const float volume = get (proc, ParamID::hallVolume);
+            set (proc, ParamID::decay, 6.0f);
+            edit (proc, ParamID::hallOn, 1.0f);
+            MessageManager::getInstance()->runDispatchLoopUntil (EditHistory::kQuietMs + 300);
+            expect (std::abs (get (proc, ParamID::hallVolume) - volume) > 1.0f, "the hall starts at the decay");
+            h.undo();
+            expectEquals (get (proc, ParamID::hallOn), 0.0f);
+            expectWithinAbsoluteError (get (proc, ParamID::hallVolume), volume, 0.5f);
+            expectWithinAbsoluteError (get (proc, ParamID::decay), 6.0f, 0.01f);
+        }
+
+        beginTest ("A/B: two settings, the second starts as a copy, each keeps its undo");
+        {
+            edit (proc, ParamID::mix, 40.0f);
+            h.flush();
+            expectEquals (proc.getABSlot(), 0);
+            proc.selectABSlot (1);
+            expectEquals (proc.getABSlot(), 1);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 40.0f, 0.01f);
+            expect (! h.canUndo(), "B has a history of its own");
+            edit (proc, ParamID::mix, 70.0f);
+            edit (proc, ParamID::decay, 9.0f);
+            h.flush();
+            proc.selectABSlot (0);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 40.0f, 0.01f);
+            expect (h.canUndo(), "A still has its history");
+            proc.selectABSlot (1);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 70.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::decay), 9.0f, 0.01f);
+            h.undo();
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 40.0f, 0.01f);
+            h.redo();
+
+            // both slots are stored with the project
+            MemoryBlock block;
+            proc.getStateInformation (block);
+            Concert7Processor restored;
+            restored.setStateInformation (block.getData(), (int) block.getSize());
+            expectEquals (restored.getABSlot(), 1);
+            expectWithinAbsoluteError (get (restored, ParamID::mix), 70.0f, 0.01f);
+            restored.selectABSlot (0);
+            expectWithinAbsoluteError (get (restored, ParamID::mix), 40.0f, 0.01f);
+
+            // copying to the other slot
+            proc.copyToOtherABSlot();
+            proc.selectABSlot (0);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 70.0f, 0.01f);
+        }
     }
 
     static void set (Concert7Processor& p, const char* id, float value)

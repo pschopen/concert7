@@ -138,6 +138,29 @@ public:
             proc.getShared().setKeptGroups (0);
         }
 
+        beginTest ("undo of a preset change brings back the preset, its decay and its impulse response");
+        {
+            auto& h = proc.getHistory();
+            proc.selectPreset ("Halls/01 Large Hall", true);
+            settle (proc);
+            h.flush();
+            const auto irLarge = proc.getCurrentIR();
+            const float decayLarge = getParam (proc, ParamID::decay);
+            proc.selectPreset ("Rooms/01 Studio A", true);
+            settle (proc);
+            MessageManager::getInstance()->runDispatchLoopUntil (EditHistory::kQuietMs + 100);
+            h.flush();
+            expect (std::abs (getParam (proc, ParamID::decay) - decayLarge) > 0.1f, "the room has its own decay");
+            h.undo();
+            settle (proc);
+            expectEquals (proc.getPresetId(), String ("Halls/01 Large Hall"));
+            expectWithinAbsoluteError (getParam (proc, ParamID::decay), decayLarge, 0.01f);
+            expect (proc.getCurrentIR() == irLarge, "switching back reuses the impulse response built before");
+            h.redo();
+            settle (proc);
+            expectEquals (proc.getPresetId(), String ("Rooms/01 Studio A"));
+        }
+
         beginTest ("choosing a preset, also the current one again, resets all parameters");
         {
             setParam (proc, ParamID::predelay, 42.0f);
