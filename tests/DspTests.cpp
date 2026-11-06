@@ -152,6 +152,177 @@ public:
             for (auto& c : ir->ch) for (float v : c) if (! std::isfinite (v)) { expect (false, "non finite sample"); break; }
         }
 
+        beginTest ("a recording that starts to fade out: the longer decay does not sink and swell");
+        {
+            // the last 0.3 s of the recording sit 3 dB below the decay line (the start of a fade-out)
+            auto ch = syntheticIR (2.0f, 2.4f, sr, 9);
+            for (auto& c : ch)
+                for (size_t n = (size_t) (2.1 * sr); n < c.size(); ++n)
+                    c[n] *= Decibels::decibelsToGain (-3.0f * (float) std::min (1.0, (n / sr - 2.1) / 0.1));
+            auto fading = makeSourceIR (ch, true, sr, sr, "fading");
+            DesignParams p;
+            p.decay = fading->nativeRT * 3.0f;
+            auto ir = designIR (*fading, nullptr, p);
+
+            // level in 100 ms blocks against the straight decay line (all of it far above -60 dB)
+            const auto& y = ir->ch[0];
+            const int block = (int) (0.1 * sr), first = (int) (0.3 * sr), last = (int) (4.0 * sr);
+            std::vector<double> t, db;
+            for (int a = first; a + block <= last && a + block <= (int) y.size(); a += block)
+            {
+                double e = 0.0;
+                for (int n = a; n < a + block; ++n) e += (double) y[(size_t) n] * y[(size_t) n];
+                t.push_back ((a + block / 2) / sr);
+                db.push_back (10.0 * std::log10 (e / block + 1e-30));
+            }
+            double st = 0, sd = 0, stt = 0, std_ = 0;
+            for (size_t i = 0; i < t.size(); ++i) { st += t[i]; sd += db[i]; stt += t[i] * t[i]; std_ += t[i] * db[i]; }
+            const double k = (t.size() * std_ - st * sd) / (t.size() * stt - st * st), c0 = (sd - k * st) / t.size();
+            double worst = 0.0;
+            for (size_t i = 1; i + 1 < t.size(); ++i) // 300 ms average: the dip, not the noise
+                worst = std::max (worst, std::abs ((db[i - 1] + db[i] + db[i + 1]) / 3.0 - (c0 + k * t[i])));
+            logMessage ("  largest deviation from the decay line " + String (worst, 2) + " dB");
+            expectLessThan (worst, 1.0);
+        }
+
+        beginTest ("decay keeps the air absorption: highs change less than the mids");
+        {
+            // a hall whose highs decay faster than its mids (air absorption)
+            auto hall = makeSourceIR (twoBandIR (2.0f, 1.0f, 3.0f, sr), true, sr, sr, "hall");
+            DesignParams same;
+            same.decay = hall->nativeRT;
+            const float nativeHi = rtOf (*designIR (*hall, nullptr, same), 6000.0f, 12000.0f);
+            for (float factor : { 3.0f, 0.4f })
+            {
+                DesignParams p;
+                p.decay = hall->nativeRT * factor;
+                const float hi = rtOf (*designIR (*hall, nullptr, p), 6000.0f, 12000.0f);
+                logMessage ("  x" + String (factor) + ": highs " + String (hi, 3) + " s, proportional would be "
+                            + String (nativeHi * factor, 3) + " s");
+                // the highs move towards the native value: less than proportional, but in the same direction
+                if (factor > 1.0f) { expectGreaterThan (hi, nativeHi * 1.2f); expectLessThan (hi, nativeHi * factor * 0.8f); }
+                else               { expectLessThan (hi, nativeHi * 0.8f); expectGreaterThan (hi, nativeHi * factor * 1.1f); }
+            }
+
+            // highs that decay as long as the mids cannot be air limited: they scale like the mids
+            auto p = neutral;
+            p.decay = src->nativeRT * 3.0f;
+            const float hiFlat = rtOf (*designIR (*src, nullptr, p), 6000.0f, 12000.0f);
+            logMessage ("  flat source x3: highs " + String (hiFlat, 3) + " s, target " + String (p.decay, 3) + " s");
+            expectWithinAbsoluteError (hiFlat, p.decay, p.decay * 0.15f);
+        }
+
+        beginTest ("a shorter decay fades the early part too: no drop at the crossover");
+        {
+            auto p = neutral;
+            p.decay = src->nativeRT * 0.35f;
+            auto ir = designIR (*src, nullptr, p);
+
+            // level of all channels in 5 ms blocks from 20 to 160 ms (the crossover sits at 80 ms)
+            const int block = (int) (0.005 * sr);
+            std::vector<double> t, db;
+            for (int a = src->onset + (int) (0.02 * sr); a + block <= src->onset + (int) (0.16 * sr); a += block)
+            {
+                double e = 0.0;
+                for (auto* c : chans (ir->ch)) e += energy (*c, a, a + block);
+                t.push_back ((a + block / 2 - src->onset) / sr);
+                db.push_back (10.0 * std::log10 (e / block + 1e-30));
+            }
+            double st = 0, sd = 0, stt = 0, std_ = 0;
+            const double n = (double) t.size();
+            for (size_t i = 0; i < t.size(); ++i) { st += t[i]; sd += db[i]; stt += t[i] * t[i]; std_ += t[i] * db[i]; }
+            const double k = (n * std_ - st * sd) / (n * stt - st * st), c0 = (sd - k * st) / n;
+            double worst = 0.0;
+            for (size_t i = 1; i + 1 < t.size(); ++i) // 15 ms average: the step, not the noise
+                worst = std::max (worst, std::abs ((db[i - 1] + db[i] + db[i + 1]) / 3.0 - (c0 + k * t[i])));
+            logMessage ("  slope " + String (k, 1) + " dB/s (target " + String (-60.0 / p.decay, 1)
+                        + "), largest deviation from the line " + String (worst, 2) + " dB");
+            expectLessThan (worst, 1.5);
+            expectWithinAbsoluteError (k, -60.0 / p.decay, 60.0 / p.decay * 0.15);
+
+            // a longer decay leaves the early part as it is (apart from the level that keeps the energy)
+            p.decay = src->nativeRT * 2.0f;
+            auto longer = designIR (*src, nullptr, p);
+            auto changeDb = [&] (double a, double b) {
+                const int from = src->onset + (int) (a * sr), to = src->onset + (int) (b * sr);
+                return 10.0 * std::log10 (energy (longer->ch[0], from, to) / energy (src->ch[0], from, to));
+            };
+            expectWithinAbsoluteError (changeDb (0.0, 0.025), changeDb (0.025, 0.05), 0.1);
+        }
+
+        beginTest ("every frequency keeps its own decay: a ringing frequency is scaled, not stretched without limit");
+        {
+            // decaying 1 kHz sine that rings longer than the noise reverb
+            auto ch = syntheticIR (1.0f, 3.0f, sr, 33);
+            const int onset = (int) (0.01 * sr);
+            const double kr = std::log (1000.0) / (2.0 * sr);
+            for (size_t c = 0; c < 4; ++c)
+                for (int i = onset; i < (int) ch[c].size(); ++i)
+                    ch[c][(size_t) i] += 0.05f * (float) (std::exp (-kr * (i - onset))
+                                                          * std::sin (2.0 * MathConstants<double>::pi * 1000.0 * i / sr + (double) c));
+            auto ringing = makeSourceIR (std::move (ch), true, sr, sr, "ringing");
+            auto ringRT = [&] (const BuiltIR& ir) { return rtOf (ir, 985.0f, 1015.0f); };
+            DesignParams same;
+            same.decay = ringing->nativeRT;
+            const float native = ringRT (*designIR (*ringing, nullptr, same));
+            DesignParams p;
+            p.decay = ringing->nativeRT * 1.6f;
+            const float longer = ringRT (*designIR (*ringing, nullptr, p));
+            logMessage ("  1 kHz: " + String (native, 2) + " s -> " + String (longer, 2) + " s at x1.6 (noise "
+                        + String (ringing->nativeRT, 2) + " -> " + String (p.decay, 2) + " s)");
+            // the same added dB/s for the whole band would give about 7 s
+            expectWithinAbsoluteError (longer / native, 1.6f, 0.35f);
+        }
+
+        beginTest ("the synthesised tail keeps the coherence of the channels");
+        {
+            // true stereo with correlated channels: 0.8 shared + 0.6 own noise, coherence 0.64; cut at 0.8 s
+            auto shared = syntheticIR (1.0f, 0.8f, sr, 51);
+            auto own = syntheticIR (1.0f, 0.8f, sr, 52);
+            std::array<std::vector<float>, 4> ch;
+            for (size_t c = 0; c < 4; ++c)
+            {
+                ch[c].resize (shared[0].size());
+                for (size_t i = 0; i < ch[c].size(); ++i)
+                    ch[c][i] = 0.8f * shared[0][i] + 0.6f * own[c][i];
+            }
+            auto correlated = makeSourceIR (std::move (ch), true, sr, sr, "correlated");
+            DesignParams p;
+            p.decay = 4.0f;
+            auto ir = designIR (*correlated, nullptr, p);
+            auto corr = [&] (const std::vector<float>& a, const std::vector<float>& b, double from, double to) {
+                double ab = 0, aa = 0, bb = 0;
+                for (int i = (int) (from * sr); i < std::min ((int) a.size(), (int) (to * sr)); ++i)
+                {
+                    ab += (double) a[(size_t) i] * b[(size_t) i];
+                    aa += (double) a[(size_t) i] * a[(size_t) i];
+                    bb += (double) b[(size_t) i] * b[(size_t) i];
+                }
+                return ab / std::sqrt (aa * bb + 1e-30);
+            };
+            const double measured = corr (ir->ch[0], ir->ch[3], 0.2, 0.6);
+            const double tail = corr (ir->ch[0], ir->ch[3], 1.5, 3.5);
+            const double cross = corr (ir->ch[1], ir->ch[2], 1.5, 3.5);
+            logMessage ("  correlation LL/RR: measured part " + String (measured, 2) + ", synthesised tail " + String (tail, 2)
+                        + " (LR/RL " + String (cross, 2) + ")");
+            expectWithinAbsoluteError (tail, 0.64, 0.12);
+            expectWithinAbsoluteError (cross, 0.64, 0.12);
+        }
+
+        beginTest ("the response keeps its energy when the decay changes");
+        {
+            auto levelDb = [&] (const std::vector<float>& x) { return bandEnergyDb (x, sr, 500.0f, 2000.0f, 0); };
+            const float native = levelDb (src->ch[0]);
+            for (float factor : { 3.0f, 0.4f })
+            {
+                auto p = neutral;
+                p.decay = src->nativeRT * factor;
+                const float level = levelDb (designIR (*src, nullptr, p)->ch[0]) - native;
+                logMessage ("  x" + String (factor) + ": level " + String (level, 1) + " dB");
+                expectWithinAbsoluteError (level, 0.0f, 1.0f);
+            }
+        }
+
         beginTest ("multi-band decay multipliers");
         {
             auto two = makeSourceIR (twoBandIR (1.5f, 1.5f, 3.0f, sr), true, sr, sr, "two band");

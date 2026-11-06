@@ -22,6 +22,7 @@ Knob::Knob (AudioProcessorValueTreeState& s, const String& id, const String& cap
     slider.setPopupDisplayEnabled (false, false, nullptr);
     slider.addListener (this);
     slider.addMouseListener (this, false);
+    slider.onMenu = [this] { showMenu(); };
     slider.setTooltip (parameter != nullptr ? parameter->getName (64) : String());
     addAndMakeVisible (slider);
 
@@ -63,6 +64,11 @@ void Knob::clearDisplayOverride()
     repaint();
 }
 
+Rectangle<int> Knob::getValueArea() const
+{
+    return getLocalBounds().removeFromBottom ((int) valueHeight);
+}
+
 void Knob::resized()
 {
     auto r = getLocalBounds();
@@ -70,6 +76,113 @@ void Knob::resized()
     r.removeFromBottom ((int) valueHeight);
     const int size = std::min (r.getWidth(), r.getHeight());
     slider.setBounds (r.withSizeKeepingCentre (size, size));
+    if (valueEditor != nullptr)
+        valueEditor->setBounds (getValueArea().withSizeKeepingCentre (std::min (getWidth(), 96), (int) valueHeight + 4));
+}
+
+bool Knob::setValueFromText (const String& text)
+{
+    if (parameter == nullptr || ! isValueText (text)) return false;
+    // through the slider, so the attachment writes it as one gesture (automation, undo)
+    slider.setValue (parameter->convertFrom0to1 (parameter->getValueForText (text.trim())), sendNotificationSync);
+    if (onTouched) onTouched (*this);
+    return true;
+}
+
+void Knob::showValueEditor()
+{
+    if (! isEnabled() || overridden || parameter == nullptr) return;
+    if (valueEditor != nullptr && ! valueEditor->isVisible())
+        valueEditor.reset(); // closed, waiting to be deleted
+    if (valueEditor == nullptr)
+    {
+        struct ValueEditor : public TextEditor
+        {
+            std::function<void (bool)> onTab;
+            bool keyPressed (const KeyPress& key) override
+            {
+                if (key.getKeyCode() == KeyPress::tabKey && onTab)
+                {
+                    onTab (key.getModifiers().isShiftDown());
+                    return true;
+                }
+                return TextEditor::keyPressed (key);
+            }
+        };
+        auto ed = std::make_unique<ValueEditor>();
+        ed->setJustification (Justification::centred);
+        ed->setFont (uiFont (std::max (10.0f, valueHeight * 0.78f)));
+        ed->setIndents (2, 0);
+        ed->setSelectAllWhenFocused (true);
+        ed->onReturnKey = [this] { closeValueEditor (true); };
+        ed->onEscapeKey = [this] { closeValueEditor (false); };
+        ed->onFocusLost = [this] { closeValueEditor (true); };
+        ed->onTab = [this] (bool backwards) {
+            closeValueEditor (true);
+            if (onTabKey) onTabKey (*this, backwards);
+        };
+        valueEditor = std::move (ed);
+        addAndMakeVisible (*valueEditor);
+    }
+    valueEditor->setText (parameter->getCurrentValueAsText(), false);
+    resized();
+    valueEditor->grabKeyboardFocus();
+    valueEditor->selectAll();
+}
+
+void Knob::closeValueEditor (bool apply)
+{
+    if (valueEditor == nullptr) return;
+    // the editor is deleted asynchronously: closing it may run from its own callbacks
+    auto text = valueEditor->getText();
+    valueEditor->onFocusLost = nullptr;
+    valueEditor->setVisible (false);
+    if (apply) setValueFromText (text);
+    MessageManager::callAsync ([safe = SafePointer<Knob> (this)] {
+        if (safe != nullptr && safe->valueEditor != nullptr && ! safe->valueEditor->isVisible())
+            safe->valueEditor.reset();
+    });
+    repaint();
+}
+
+void Knob::showMenu()
+{
+    if (parameter == nullptr) return;
+    PopupMenu menu;
+    const bool canEdit = isEnabled() && ! overridden;
+    menu.addSectionHeader (parameter->getName (64).toUpperCase());
+    menu.addItem ("Enter value...", canEdit, false, [safe = SafePointer<Knob> (this)] { if (safe != nullptr) safe->showValueEditor(); });
+    menu.addItem ("Reset", canEdit && slider.isDoubleClickReturnEnabled(), false, [safe = SafePointer<Knob> (this)] {
+        if (safe != nullptr) safe->slider.setValue (safe->slider.getDoubleClickReturnValue(), sendNotificationSync);
+    });
+    if (onExtendMenu) onExtendMenu (*this, menu);
+
+    // the host's own items (automation, MIDI learn ...) where it offers them (VST3)
+    if (auto* editor = findParentComponentOfClass<AudioProcessorEditor>())
+        if (auto* host = editor->getHostContext())
+            if (auto ctx = host->getContextMenuForParameter (parameter))
+            {
+                auto hostMenu = ctx->getEquivalentPopupMenu();
+                if (hostMenu.getNumItems() > 0)
+                {
+                    menu.addSeparator();
+                    menu.addSubMenu ("Host", hostMenu);
+                }
+            }
+    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (&slider).withMinimumWidth (180));
+}
+
+void Knob::mouseDown (const MouseEvent& e)
+{
+    // right click on the caption or the value (the knob itself is handled by the slider)
+    if (e.eventComponent == this && e.mods.isPopupMenu())
+        showMenu();
+}
+
+void Knob::mouseDoubleClick (const MouseEvent& e)
+{
+    if (e.eventComponent == this && getValueArea().contains (e.getPosition()))
+        showValueEditor();
 }
 
 void Knob::paint (Graphics& g)
@@ -78,6 +191,7 @@ void Knob::paint (Graphics& g)
     g.setColour (isEnabled() ? Colours::textDim : Colours::textFaint);
     g.setFont (labelFont (std::max (9.0f, captionHeight * 0.68f)));
     g.drawFittedText (caption, r.removeFromTop (captionHeight).toNearestInt(), Justification::centred, 1);
+    if (valueEditor != nullptr && valueEditor->isVisible()) return;
     g.setColour (isEnabled() ? Colours::text : Colours::textFaint);
     g.setFont (uiFont (std::max (10.0f, valueHeight * 0.78f)));
     g.drawFittedText (getValueText(), r.removeFromBottom (valueHeight).toNearestInt(), Justification::centred, 1);

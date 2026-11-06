@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Decay follows room acoustics: it no longer scales every band by the same factor, only the part of the decay
+  the walls give. Air absorption is the same in any room, so a longer Decay keeps the highs shorter, like a
+  larger hall (Large Hall at 7 s: 8 kHz 3.0 s instead of 4.9 s, the lows a little longer), and a shorter Decay
+  is flatter over frequency, like a smaller room (at 0.6 s: 8 kHz 0.54 s instead of 0.42 s)
+- A longer Decay no longer sinks and swells where the recording ends: many impulse responses already drop a few
+  dB below their decay line shortly before their end (the start of a fade-out or of the noise floor). That dip
+  was kept, and the continued tail started on the line again. The recording is now used only as long as it
+  follows the line
+- A shorter Decay also fades the early reflections: a room that absorbs more absorbs them too. Before, they
+  kept their level and the response dropped at the early / late crossover (by about 10 dB for Large Hall at 0.4 s).
+  A longer Decay leaves them as they are
+- Every frequency keeps its own decay: Decay scales the reverb time each frequency has in the recording
+  instead of adding the same amount of decay to a whole third octave, so a frequency that rings longer stays
+  relatively longer and does not ring on almost without end
+- The continued tail of a longer Decay starts on each frequency's own level. It used to take it from the last
+  frames of the recording, averaged with the neighbouring frequencies – in the bass more than an octave, so the
+  lows jumped by up to 7 dB where the recording ended and rang on 7 - 15 % too long (Small Hall at 2.3 s)
+- The continued tail keeps the coherence of the channels as recorded (it was fully decorrelated). The M7
+  recordings are almost decorrelated anyway; impulse responses of coincident or closely spaced microphones
+  now keep their image
+- Decay no longer changes the loudness of the reverb, only how long it rings: a longer decay starts softer, a
+  shorter one louder, the response keeps its energy (before, three times the decay was about 7 dB louder, 0.4
+  times about 9 dB softer). Early reflections and tail get the same gain, so the decay stays one line
+- `tools/decay_families.py` checks Decay against the Large / Medium / Small families of the Bricasti library
 - Modulation modes in the EXTRAS tab. An impulse response is a frozen snapshot, so the movement of the M7's own
   reverb is not in the recordings; the new modes add it back to the late reverb and leave the early reflections
   alone

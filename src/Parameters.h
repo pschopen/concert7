@@ -113,6 +113,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 /** True for parameters that change the impulse response (and therefore need a rebuild). */
 bool isIRParameter (const juce::String& paramID);
 
+/** True when text could be a typed value (a number, or "off" / "preset"). The parameters read typed values
+    with their own units: "2.5", "2,5 s", "250 ms", "1.2k", "-6", "off". */
+bool isValueText (const juce::String& text);
+
 /** Human readable value strings shared by parameters, the display and tests. */
 juce::String formatMs (float ms);
 juce::String formatOffsetMs (float ms);

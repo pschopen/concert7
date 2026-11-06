@@ -1,0 +1,81 @@
+// Concert7 - open source true stereo convolution reverb
+// Copyright (C) 2026 pschopen, GPL-3.0-or-later
+//
+// Tests of the parameters and the processor state that need no impulse responses: typed values.
+
+#include "TestHelpers.h"
+#include "PluginProcessor.h"
+#include "ui/Widgets.h"
+
+namespace concert7::test
+{
+using namespace juce;
+
+namespace
+{
+    float valueForText (Concert7Processor& p, const char* id, const String& text)
+    {
+        auto* prm = p.getAPVTS().getParameter (id);
+        return prm->convertFrom0to1 (prm->getValueForText (text));
+    }
+}
+
+class StateTest : public UnitTest
+{
+public:
+    StateTest() : UnitTest ("State", "concert7-state") {}
+
+    void runTest() override
+    {
+        Concert7Processor proc;
+
+        beginTest ("typed values: every parameter reads back its own value text");
+        for (auto* prm : proc.getParameters())
+        {
+            auto* rp = dynamic_cast<RangedAudioParameter*> (prm);
+            if (rp == nullptr) continue;
+            for (float pos : { 0.0f, 0.03f, 0.13f, 0.5f, 0.77f, 1.0f })
+            {
+                const auto text = rp->getText (pos, 64);
+                const auto back = rp->getText (rp->getValueForText (text), 64);
+                expectEquals (back, text, rp->paramID + " at " + String (pos));
+            }
+        }
+
+        beginTest ("typed values: units, decimal comma, off");
+        expectWithinAbsoluteError (valueForText (proc, ParamID::decay, "2,5"), 2.5f, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::decay, "2500 ms"), 2.5f, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::decay, "99"), 30.0f, 0.001f);   // clamped
+        expectWithinAbsoluteError (valueForText (proc, ParamID::predelay, "0.1 s"), 100.0f, 0.01f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::predelay, "35"), 35.0f, 0.01f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::irOffset, "-1.5 s"), -1500.0f, 0.5f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::eqMidFreq, "1.2k"), 1200.0f, 0.5f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::eqMidFreq, "1,2 kHz"), 1200.0f, 0.5f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::eqMidGain, "-6 dB"), -6.0f, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::early, "off"), kLevelOffDb, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::lateRolloff, "Off"), 22000.0f, 0.5f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::lateRolloff, "8k"), 8000.0f, 0.5f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::duckAmount, "-6"), 6.0f, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::mix, "45 %"), 45.0f, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::hallVolume, "16 000 m\xc2\xb3"), 16000.0f, 1.0f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::hallVolume, "8k"), 8000.0f, 1.0f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::distMic, "50 cm"), 0.5f, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::erPattern, "Preset"), 0.0f, 0.001f);
+        expectWithinAbsoluteError (valueForText (proc, ParamID::erPattern, "12"), 12.0f, 0.001f);
+        expect (! isValueText ("abc"));
+        expect (! isValueText (""));
+        expect (isValueText ("off") && isValueText ("-3,5 dB"));
+
+        beginTest ("typed values: a knob takes a typed value, ignores text that is no value");
+        {
+            Knob knob (proc.getAPVTS(), ParamID::decay, "DECAY");
+            expect (knob.setValueFromText ("3.4 s"));
+            expectWithinAbsoluteError (proc.getAPVTS().getRawParameterValue (ParamID::decay)->load(), 3.4f, 0.01f);
+            expect (! knob.setValueFromText ("long"));
+            expectWithinAbsoluteError (proc.getAPVTS().getRawParameterValue (ParamID::decay)->load(), 3.4f, 0.01f);
+        }
+    }
+};
+
+static StateTest stateTest;
+} // namespace concert7::test

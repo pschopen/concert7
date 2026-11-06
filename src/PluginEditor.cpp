@@ -354,10 +354,37 @@ Knob& MainPanel::addKnob (std::vector<std::unique_ptr<Knob>>& list, Component& p
 {
     auto k = std::make_unique<Knob> (state, id, caption, bipolar);
     k->onTouched = [this] (Knob& kn) { touch (kn); };
+    k->onTabKey = [this] (Knob& kn, bool backwards) { editNextKnob (kn, backwards); };
     k->setTooltip (tooltipFor (id));
     parent.addAndMakeVisible (*k);
     list.push_back (std::move (k));
     return *list.back();
+}
+
+void MainPanel::editNextKnob (Knob& from, bool backwards)
+{
+    // the knobs next to it (same row of controls), left to right, top to bottom
+    std::vector<Knob*> row;
+    for (auto& k : knobs)
+        if (k->getParentComponent() == from.getParentComponent() && k->isShowing() && k->isEnabled())
+            row.push_back (k.get());
+    std::sort (row.begin(), row.end(), [] (Knob* a, Knob* b) {
+        const auto pa = a->getBounds().getCentre(), pb = b->getBounds().getCentre();
+        return std::abs (pa.y - pb.y) > 40 ? pa.y < pb.y : pa.x < pb.x;
+    });
+    const auto it = std::find (row.begin(), row.end(), &from);
+    if (it == row.end() || row.size() < 2) return;
+    const int n = (int) row.size(), start = (int) (it - row.begin());
+    for (int step = 1; step < n; ++step)
+    {
+        auto* next = row[(size_t) (((start + (backwards ? -step : step)) % n + n) % n)];
+        next->showValueEditor();
+        if (next->isEditingValue())
+        {
+            touch (*next);
+            return;
+        }
+    }
 }
 
 void MainPanel::touch (Knob& k)

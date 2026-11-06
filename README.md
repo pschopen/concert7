@@ -109,10 +109,14 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
 1. **Analysis** (once per preset): onset detection, third-octave band envelopes from an STFT, noise-floor / fade-out
    detection per band and a noise compensated Schroeder fit (Lundeby style) of the late reverb time.
 2. **Split** into early reflections and late reverb (raised cosine crossover ≈ 80 ms after the onset).
-3. **Late reverb**: every STFT bin gets a time-varying gain that turns the native decay slope into the target slope
-   (Decay × low/high multipliers). The gain is capped so the level never rises above the target decay line, which
-   keeps the recording's noise floor down. Where the recording ends or reaches its noise floor, the tail is
-   continued with random-phase noise that follows the target decay – so a 1 s room can become a 20 s space.
+3. **Late reverb**: every STFT bin gets a time-varying gain that turns its own native decay slope (fitted per bin)
+   into the target slope (Decay × low/high multipliers), so a frequency that rings longer stays relatively longer.
+   A shorter decay fades the early reflections the same way. The gain is capped so the level never rises above the
+   target decay line, which keeps the recording's noise floor down. Where the recording ends or reaches its noise
+   floor, the tail is continued with random-phase noise that starts on each bin's fitted decay line, keeps the
+   measured coherence of the channels and follows the target decay – so a 1 s room can become a 20 s space.
+   The whole response keeps the energy it has at the native decay: Decay changes how long it rings, not how loud.
+   `tools/decay_families.py` checks the result against the Large / Medium / Small families of the library.
    VLF and the late roll-off are applied as spectral gains. **Smooth** lowers bins that stick out of their
    third-octave neighbourhood (measured with the native decay removed, so long ringing counts as much as loud) and
    pulls each band envelope towards its fitted decay line.

@@ -37,6 +37,7 @@ private:
     void showPresetMenu (const juce::String& onlyCategory, juce::Component* target);
     void showSetupMenu();
     void touch (Knob& k);
+    void editNextKnob (Knob& from, bool backwards);
     Knob& addKnob (std::vector<std::unique_ptr<Knob>>& list, juce::Component& parent, const char* id,
                    const juce::String& caption, bool bipolar = false);
 

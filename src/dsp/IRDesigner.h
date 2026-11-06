@@ -12,9 +12,11 @@
 //  2. The late part is analysed in third-octave bands (Schroeder integration)
 //     to find the native reverb time per band and the point where each band
 //     reaches its noise floor / end of file.
-//  3. In the STFT domain every bin receives a time-varying gain that turns the
-//     native decay slope into the target slope. Beyond the valid region the
-//     tail is continued with random-phase noise that follows the target decay,
+//  3. In the STFT domain every bin receives a time-varying gain that turns its
+//     own native decay slope into the target slope (a shorter decay fades the
+//     early part the same way). Beyond the valid region the tail is continued
+//     with random-phase noise that starts on the bin's fitted decay line, keeps
+//     the measured coherence of the channels and follows the target decay,
 //     so the reverb can be made longer than the recording. "Smooth" pulls each
 //     bin towards its third-octave neighbourhood (resonances, ringing) and each
 //     band envelope towards its fitted decay line (bumps, late echoes).
@@ -31,6 +33,7 @@
 
 #include <juce_core/juce_core.h>
 #include <array>
+#include <complex>
 #include <memory>
 #include <vector>
 #include "IRLibrary.h"
@@ -60,6 +63,14 @@ struct SourceIR
     std::vector<float> bandIntercept;  // dB at the onset of the fitted decay line (same scale as bandLevelDb)
     std::vector<std::vector<float>> bandLevelDb; // smoothed band level per STFT frame (sum of channels)
     std::vector<float> binColourDb;  // late reverb level of each STFT bin relative to its third-octave neighbourhood
+
+    // every STFT bin's own late decay: its reverb time, the power of each channel on that decay line at the
+    // onset, and the coherence of the channels as the lower triangular factor of their coherence matrix
+    // (row i, column j <= i at binMix[k * 10 + i * (i + 1) / 2 + j], i and j count the used channels:
+    // 0 1 2 3 for true stereo, 0 3 for stereo)
+    std::vector<float> binRT;
+    std::array<std::vector<float>, 4> binPower;
+    std::vector<std::complex<float>> binMix;
 
     int length() const { return (int) ch[0].size(); }
 };

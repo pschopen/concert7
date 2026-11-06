@@ -4,6 +4,7 @@
 #include "IRDesigner.h"
 #include "../Parameters.h"
 #include "AudioFFT.h"
+#include "Distance.h"
 #include "PostProcessing.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <cmath>
@@ -26,11 +27,19 @@ namespace
     constexpr float kMaxBoostDb       = 120.0f; // numeric guard only, the band cap does the real limiting
     constexpr float kLateFitStart     = 0.06f;  // RT is fitted on the late reverb, after the early reflections
     constexpr float kCapMarginDb      = 6.0f;   // allowed excess over the target decay line
+    constexpr float kEndToleranceDb   = 1.5f;   // the valid range ends where the level leaves the decay line by more
+    constexpr float kEndWindowSeconds = 0.08f;  // ... averaged over +- this
+    constexpr float kEndBackoffSeconds = 0.5f;  // ... and at most this much earlier than the fade / floor detection
     constexpr float kSmoothCutDb      = 9.0f;   // Smooth: largest cut of a resonance / envelope bump
     constexpr float kSmoothBoostDb    = 3.0f;   // Smooth: largest lift of a dip
     constexpr float kSmoothRampSeconds = 0.05f; // Smooth: envelope correction fades in after the split
     constexpr float kSmoothLowHz      = 40.0f;  // Smooth: frequency range of the resonance correction
     constexpr float kSmoothHighHz     = 16000.0f;
+    constexpr float kBinFitStart      = 0.12f;  // decay of every bin: fitted from here on (after the early part)
+    constexpr int   kMinBinFrames     = 6;
+    constexpr float kBinRTRange       = 3.0f;   // a bin's reverb time stays within this factor of its band's
+    constexpr double kCoherenceRidge  = 1e-3;
+    constexpr int   kPhaseTableSize   = 4096;   // synthesised tail: random phases from a table
     constexpr float kVariantMatchSeconds = 0.01f; // late variant: block length of its energy match
     constexpr float kVariantMaxGain   = 4.0f;
     constexpr int64 kVariantSeed      = 0x7a11;
@@ -259,6 +268,52 @@ namespace
         const float wh = 1.0f / (1.0f + (p.highFreq / f) * (p.highFreq / f));
         return std::pow (p.lowMult, wl) * std::pow (p.highMult, wh);
     }
+
+    /** Native band RT -> target RT for DECAY (before the multi-band multipliers).
+        Sabine: 1/RT = A / 0.161 V + 4 m / 0.161, the decay rate of the walls plus that of the air. A longer or
+        shorter DECAY is a room with more or less wall absorption (or larger / smaller), so only the wall part
+        is scaled. The air part is the same in any room: the highs, where it dominates, grow less than the mids
+        in a larger hall, and the decay gets flatter over frequency in a smaller room.
+        The recording only gives the sum, so it is split: the walls absorb the highs at least as much as the
+        mids, whatever shortens the highs beyond that is air - at most as much as air can (ISO 9613-1). */
+    struct DecayScaling
+    {
+        DecayScaling (const SourceIR& src, float decay)
+            : wallMid (std::max (0.0f, 1.0f / std::max (0.01f, src.nativeRT) - airRate (1000.0f)))
+        {
+            // wall factor k so that the mid bands (as in nativeRT) still give DECAY on average
+            auto midRT = [&] (float kk) {
+                double logSum = 0.0; int count = 0;
+                for (size_t b = 0; b < src.bandFreq.size(); ++b)
+                    if (src.bandFreq[b] >= 490.0f && src.bandFreq[b] <= 2100.0f)
+                    { logSum += std::log (target (src.bandRT[b], src.bandFreq[b], kk)); ++count; }
+                return count > 0 ? (float) std::exp (logSum / count) : src.nativeRT / kk;
+            };
+            float lo = 1e-3f, hi = 1e3f;
+            for (int i = 0; i < 50; ++i)
+            {
+                k = std::sqrt (lo * hi);
+                (midRT (k) > decay ? lo : hi) = k;
+            }
+        }
+
+        float operator() (float rn, float f) const { return target (rn, f, k); }
+
+    private:
+        float target (float rn, float f, float kk) const
+        {
+            const float air = jlimit (0.0f, airRate (f), 1.0f / rn - wallMid);
+            return 1.0f / ((1.0f / rn - air) * kk + air);
+        }
+
+        static float airRate (float f)
+        {
+            // 4 m / 0.161 in 1/s, m = energy attenuation per metre
+            return (float) (4.0 * airAbsorptionDbPerMetre (f, kAirHumidity) / 4.343 / 0.161);
+        }
+
+        float wallMid, k = 1.0f;
+    };
 
     std::vector<float> envelopeDb (const std::vector<const std::vector<float>*>& channels, int points, int totalSamples,
                                    double refPower)
@@ -577,6 +632,31 @@ void analyseSourceIR (SourceIR& src)
         src.bandIntercept[b] = icept[icept.size() / 2];
     }
 
+    // The last part of the valid range can already leave the decay line (the start of a fade-out or of the
+    // noise floor, a few dB only). A longer decay would keep that dip and the synthesised tail would start on
+    // the line again: the level sinks and swells. So the valid range ends where the level still follows the line.
+    const int endWindow = std::max (1, (int) std::lround (kEndWindowSeconds / frameSeconds));
+    const int maxBackoff = (int) std::lround (kEndBackoffSeconds / frameSeconds);
+    for (size_t b = 0; b < centres.size(); ++b)
+    {
+        const auto& level = src.bandLevelDb[b];
+        auto deviation = [&] (int m) {
+            double acc = 0.0; int cnt = 0;
+            for (int j = std::max (0, m - endWindow); j <= std::min ((int) level.size() - 1, m + endWindow); ++j)
+            {
+                const float tau = (float) ((j * be.hop - src.onset) / sr);
+                acc += level[(size_t) j] - (src.bandIntercept[b] - 60.0f * tau / src.bandRT[b]);
+                ++cnt;
+            }
+            return cnt > 0 ? (float) (acc / cnt) : 0.0f;
+        };
+        int validEnd = (int) std::lround ((src.onset + src.bandValidEnd[b] * sr) / be.hop);
+        const int limit = std::max (fitRange[b].first + 4, validEnd - maxBackoff);
+        while (validEnd > limit && std::abs (deviation (validEnd)) > kEndToleranceDb)
+            --validEnd;
+        src.bandValidEnd[b] = (float) ((validEnd * be.hop - src.onset) / sr);
+    }
+
     // colouration of the late reverb (for Smooth): mean level of every STFT bin over its valid late range with
     // the native decay removed, so long ringing counts as much as loud, relative to its third-octave neighbourhood
     Stft stft (stftSizeFor (sr));
@@ -594,8 +674,17 @@ void analyseSourceIR (SourceIR& src)
         lastFrame = std::max (lastFrame, validFrame[(size_t) k]);
     }
 
+    // the bins' own decay is fitted from where the early part has surely faded out (or from the start of the
+    // late reverb on, where that leaves too few frames)
+    const int mBin = std::max (mLate, (int) std::lround ((src.onset + kBinFitStart * sr) / stft.hop));
+    std::vector<int> binStart ((size_t) bins);
+    for (int k = 0; k < bins; ++k)
+        binStart[(size_t) k] = std::min (validFrame[(size_t) k] - mBin >= kMinBinFrames ? mBin : std::max (0, mLate),
+                                         std::max (0, validFrame[(size_t) k] - kMinBinFrames));
+
     std::vector<double> levelSum ((size_t) bins, 0.0);
     std::vector<int> levelCount ((size_t) bins, 0);
+    std::vector<std::array<double, 5>> fitSums ((size_t) bins, { 0.0, 0.0, 0.0, 0.0, 0.0 }); // n, t, y, tt, ty
     std::vector<float> re ((size_t) bins), im ((size_t) bins), power ((size_t) bins);
     for (int m = std::max (0, mLate); m <= lastFrame; ++m)
     {
@@ -611,9 +700,132 @@ void analyseSourceIR (SourceIR& src)
         for (int k = 0; k < bins; ++k)
             if (m <= validFrame[(size_t) k])
             {
-                levelSum[(size_t) k] += 10.0 * std::log10 ((double) power[(size_t) k] + 1e-30) + 60.0 * tau / rn[(size_t) k];
+                const double y = 10.0 * std::log10 ((double) power[(size_t) k] + 1e-30);
+                levelSum[(size_t) k] += y + 60.0 * tau / rn[(size_t) k];
                 ++levelCount[(size_t) k];
+                if (m >= binStart[(size_t) k])
+                {
+                    auto& s = fitSums[(size_t) k];
+                    s[0] += 1.0; s[1] += tau; s[2] += y; s[3] += tau * tau; s[4] += tau * y;
+                }
             }
+    }
+
+    // reverb time of every bin: the slope of its level, the decay rates averaged over 1/16 octave. The band
+    // values keep it within reason (bins with little energy, the ends of the spectrum).
+    {
+        std::vector<double> rate ((size_t) bins, 0.0);
+        std::vector<bool> fitted ((size_t) bins, false);
+        for (int k = 1; k < bins - 1; ++k)
+        {
+            const auto& s = fitSums[(size_t) k];
+            const double det = s[0] * s[3] - s[1] * s[1];
+            if (s[0] < kMinBinFrames || det <= 1e-12) continue;
+            const double slope = (s[0] * s[4] - s[1] * s[2]) / det; // dB per second
+            if (slope >= -1e-3) continue;
+            rate[(size_t) k] = -slope / 60.0;
+            fitted[(size_t) k] = true;
+        }
+        src.binRT.assign ((size_t) bins, 0.0f);
+        for (int k = 0; k < bins; ++k)
+        {
+            const int w = std::max (1, (int) (k * 0.0217)); // 2^(1/32) - 1
+            double acc = 0.0; int cnt = 0;
+            for (int j = std::max (0, k - w); j <= std::min (bins - 1, k + w); ++j)
+                if (fitted[(size_t) j]) { acc += rate[(size_t) j]; ++cnt; }
+            const float band = rn[(size_t) k];
+            src.binRT[(size_t) k] = cnt > 0 ? jlimit (band / kBinRTRange, band * kBinRTRange, (float) (cnt / acc)) : band;
+        }
+    }
+
+    // power of every channel on its bin's decay line at the onset, and the channels' cross spectra: each frame
+    // with the bin's decay removed, so the late frames count as much as the early ones
+    {
+        const int nch = (int) channels.size();
+        std::vector<std::array<std::complex<double>, 10>> cross ((size_t) bins);
+        for (auto& sums : cross) sums.fill ({ 0.0, 0.0 });
+        std::vector<int> frames ((size_t) bins, 0);
+        std::array<std::vector<float>, 4> xr, xi;
+        for (int i = 0; i < nch; ++i) { xr[(size_t) i].resize ((size_t) bins); xi[(size_t) i].resize ((size_t) bins); }
+        const int first = *std::min_element (binStart.begin(), binStart.end());
+        for (int m = first; m <= lastFrame; ++m)
+        {
+            for (int i = 0; i < nch; ++i)
+                stft.forward (channels[(size_t) i]->data(), len, m, xr[(size_t) i].data(), xi[(size_t) i].data());
+            const double tau = (m * stft.hop - src.onset) / sr;
+            for (int k = 0; k < bins; ++k)
+            {
+                if (m < binStart[(size_t) k] || m > validFrame[(size_t) k]) continue;
+                const double w = std::pow (10.0, std::min (250.0, 6.0 * tau / src.binRT[(size_t) k]));
+                auto& cr = cross[(size_t) k];
+                for (int i = 0; i < nch; ++i)
+                {
+                    const std::complex<double> a (xr[(size_t) i][(size_t) k], xi[(size_t) i][(size_t) k]);
+                    for (int j = 0; j <= i; ++j)
+                        cr[(size_t) (i * (i + 1) / 2 + j)] += w * a * std::conj (std::complex<double> (xr[(size_t) j][(size_t) k], xi[(size_t) j][(size_t) k]));
+                }
+                ++frames[(size_t) k];
+            }
+        }
+
+        for (auto& p : src.binPower) p.clear();
+        src.binMix.assign ((size_t) bins * 10, { 0.0f, 0.0f });
+        for (int i = 0; i < nch; ++i)
+        {
+            const int c = src.trueStereo ? i : (i == 0 ? 0 : 3);
+            src.binPower[(size_t) c].assign ((size_t) bins, 0.0f);
+            for (int k = 0; k < bins; ++k)
+                if (frames[(size_t) k] > 0)
+                    src.binPower[(size_t) c][(size_t) k] = (float) (cross[(size_t) k][(size_t) (i * (i + 3) / 2)].real() / frames[(size_t) k]);
+        }
+
+        // coherence, averaged over 1/16 octave (a few frames alone would overstate it), then its Cholesky factor.
+        // A little added to the diagonal keeps it positive definite.
+        for (int k = 0; k < bins; ++k)
+        {
+            const int w = std::max (1, (int) (k * 0.0217));
+            std::array<std::complex<double>, 10> s;
+            s.fill ({ 0.0, 0.0 });
+            for (int j = std::max (0, k - w); j <= std::min (bins - 1, k + w); ++j)
+                for (size_t q = 0; q < s.size(); ++q) s[q] += cross[(size_t) j][q];
+
+            std::array<std::complex<double>, 10> g;
+            bool ok = true;
+            for (int i = 0; i < nch && ok; ++i)
+                ok = s[(size_t) (i * (i + 3) / 2)].real() > 1e-30;
+            for (int i = 0; i < nch && ok; ++i)
+                for (int j = 0; j <= i; ++j)
+                {
+                    const double norm = std::sqrt (s[(size_t) (i * (i + 3) / 2)].real() * s[(size_t) (j * (j + 3) / 2)].real());
+                    g[(size_t) (i * (i + 1) / 2 + j)] = i == j ? std::complex<double> (1.0 + kCoherenceRidge, 0.0)
+                                                               : s[(size_t) (i * (i + 1) / 2 + j)] / norm;
+                }
+
+            std::array<std::complex<double>, 10> L;
+            L.fill ({ 0.0, 0.0 });
+            for (int i = 0; i < nch && ok; ++i)
+                for (int j = 0; j <= i && ok; ++j)
+                {
+                    std::complex<double> acc = g[(size_t) (i * (i + 1) / 2 + j)];
+                    for (int q = 0; q < j; ++q)
+                        acc -= L[(size_t) (i * (i + 1) / 2 + q)] * std::conj (L[(size_t) (j * (j + 1) / 2 + q)]);
+                    if (i == j)
+                    {
+                        ok = acc.real() > 1e-9;
+                        if (ok) L[(size_t) (i * (i + 3) / 2)] = std::sqrt (acc.real());
+                    }
+                    else
+                        L[(size_t) (i * (i + 1) / 2 + j)] = acc / L[(size_t) (j * (j + 3) / 2)].real();
+                }
+
+            // rows of unit power (the ridge made them a little larger), or independent channels
+            const double unit = 1.0 / std::sqrt (1.0 + kCoherenceRidge);
+            for (int i = 0; i < nch; ++i)
+                for (int j = 0; j <= i; ++j)
+                    src.binMix[(size_t) k * 10 + (size_t) (i * (i + 1) / 2 + j)]
+                        = ok ? std::complex<float> (L[(size_t) (i * (i + 1) / 2 + j)] * unit)
+                             : std::complex<float> (i == j ? 1.0f : 0.0f, 0.0f);
+        }
     }
 
     const int kLo = (int) std::ceil (kSmoothLowHz * stft.N / sr);
@@ -808,6 +1020,60 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
         return (float) (0.5 + 0.5 * std::cos (kPi * (n - splitA) / (double) fade));
     };
 
+    // ---- decay model of every STFT bin
+    // Each bin keeps its own reverb time (a ringing frequency stays relatively longer); DECAY scales it.
+    const float scale = p.decay / std::max (0.01f, src.nativeRT);
+    const DecayScaling decayScaling (src, p.decay);
+    const bool vlfOff = p.vlfDb <= kVlfOffDb + 0.01f;
+    const bool neutralLate = std::abs (scale - 1.0f) < 0.005f && std::abs (p.lowMult - 1.0f) < 0.005f
+                          && std::abs (p.highMult - 1.0f) < 0.005f && p.vlfDb >= -0.05f
+                          && p.lateRolloffHz >= kRolloffBypassHz && p.smooth < 0.005f;
+
+    Stft stft (stftSizeFor (sr));
+    const int N = stft.N, hop = stft.hop, bins = stft.bins;
+    auto frameTime = [&] (int m) { return (float) ((m * hop - src.onset) / sr); };
+    std::vector<float> re ((size_t) bins), im ((size_t) bins);
+    std::vector<float> rtNat ((size_t) bins), rtTgt ((size_t) bins), slopeDb ((size_t) bins);
+    const bool perBin = (int) src.binRT.size() == bins;
+    bool shorter = false;
+    for (int k = 0; k < bins && ! neutralLate; ++k)
+    {
+        const float f = std::max (1.0f, (float) (k * sr / N));
+        const float rn = perBin ? src.binRT[(size_t) k] : interpLogFreq (src.bandFreq, src.bandRT, f);
+        const float rt = jlimit (0.05f, 120.0f, decayScaling (rn, f) * decayMultiplier (f, p));
+        rtNat[(size_t) k] = rn;
+        rtTgt[(size_t) k] = rt;
+        slopeDb[(size_t) k] = 60.0f * (1.0f / rn - 1.0f / rt);
+        shorter = shorter || (k > 0 && slopeDb[(size_t) k] < -0.01f);
+    }
+
+    // The response keeps the energy (500 Hz - 2 kHz) it has at the native decay: DECAY changes how long it rings,
+    // not how loud it is (a longer decay starts softer, a shorter one louder). Early part and late reverb get the
+    // same gain, so the decay stays one line across the crossover. Per bin: the early part decays with the
+    // shorter of native and target decay (see below), the late reverb with the target.
+    float levelComp = 1.0f;
+    if (! neutralLate && perBin)
+    {
+        const double lateStart = splitSec + 0.5 * kSplitFadeSeconds;
+        auto energy = [&] (double rt, double from, double to) { // integral of 10^(-6 t / rt), without 1 / (6 ln 10)
+            return rt * (std::pow (10.0, -6.0 * from / rt) - (to < 0.0 ? 0.0 : std::pow (10.0, -6.0 * to / rt)));
+        };
+        double eNative = 0.0, eTarget = 0.0;
+        for (int k = 0; k < bins; ++k)
+        {
+            const float f = (float) (k * sr / N);
+            if (f < 500.0f || f > 2000.0f) continue;
+            double w = 0.0;
+            for (int c : chans)
+                if (! src.binPower[(size_t) c].empty()) w += src.binPower[(size_t) c][(size_t) k];
+            const double rn = rtNat[(size_t) k], rt = rtTgt[(size_t) k];
+            eNative += w * energy (rn, 0.0, -1.0);
+            eTarget += w * (energy (std::min (rn, rt), 0.0, lateStart) + energy (rt, lateStart, -1.0));
+        }
+        if (eNative > 0.0 && eTarget > 0.0)
+            levelComp = (float) std::sqrt (eNative / eTarget);
+    }
+
     // ---- early part (own or from the selected pattern)
     std::array<std::vector<float>, 4> early;
     for (int c : chans)
@@ -828,16 +1094,33 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
                     e[(size_t) n] = x[(size_t) idx] * earlyWeight (n);
             }
         }
+
+        // A shorter decay is a room that absorbs more: its early reflections fade with the same decay as the
+        // late reverb, from the onset on (otherwise they keep their level and the response drops at the
+        // crossover). A longer decay leaves them as they are.
+        if (shorter && ! e.empty())
+        {
+            const int el = (int) e.size();
+            std::vector<float> y ((size_t) el, 0.0f), norm ((size_t) el, 0.0f);
+            for (int m = 0; m < stft.numFrames (el); ++m)
+            {
+                stft.forward (e.data(), el, m, re.data(), im.data());
+                const float t = std::max (0.0f, frameTime (m));
+                for (int k = 0; k < bins; ++k)
+                {
+                    const float g = Decibels::decibelsToGain (std::min (0.0f, slopeDb[(size_t) k] * t), -400.0f);
+                    re[(size_t) k] *= g;
+                    im[(size_t) k] *= g;
+                }
+                stft.inverseAccumulate (re.data(), im.data(), m, y.data(), norm.data(), el);
+            }
+            for (int n = 0; n < el; ++n)
+                e[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
+        }
         lowPassInPlace (e, sr, p.erRolloffHz);
     }
 
     // ---- late part
-    const float scale = p.decay / std::max (0.01f, src.nativeRT);
-    const bool vlfOff = p.vlfDb <= kVlfOffDb + 0.01f;
-    const bool neutralLate = std::abs (scale - 1.0f) < 0.005f && std::abs (p.lowMult - 1.0f) < 0.005f
-                          && std::abs (p.highMult - 1.0f) < 0.005f && p.vlfDb >= -0.05f
-                          && p.lateRolloffHz >= kRolloffBypassHz && p.smooth < 0.005f;
-
     std::array<std::vector<float>, 4> late;
     if (neutralLate)
     {
@@ -850,12 +1133,7 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     }
     else
     {
-        Stft stft (stftSizeFor (sr));
-        const int N = stft.N, hop = stft.hop, bins = stft.bins;
-
-        // per bin decay model
-        std::vector<float> rtNat ((size_t) bins), rtTgt ((size_t) bins), slopeDb ((size_t) bins),
-                           staticAmp ((size_t) bins);
+        std::vector<float> staticAmp ((size_t) bins);
         std::vector<int> validFrame ((size_t) bins);
         const float vlfLin = vlfOff ? 0.0f : Decibels::decibelsToGain (p.vlfDb);
         float tailSeconds = splitSec + 0.05f;
@@ -865,12 +1143,6 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
         for (int k = 0; k < bins; ++k)
         {
             const float f = std::max (1.0f, (float) (k * sr / N));
-            const float rn = interpLogFreq (src.bandFreq, src.bandRT, f);
-            const float rt = jlimit (0.05f, 120.0f, rn * scale * decayMultiplier (f, p));
-            rtNat[(size_t) k] = rn;
-            rtTgt[(size_t) k] = rt;
-            slopeDb[(size_t) k] = 60.0f * (1.0f / rn - 1.0f / rt);
-
             const float wv = 1.0f / (1.0f + std::pow (f / kVlfCrossoverHz, 4.0f));
             float amp = 1.0f + (vlfLin - 1.0f) * wv;
             if (p.lateRolloffHz < kRolloffBypassHz)
@@ -883,7 +1155,7 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
             validFrame[(size_t) k] = jlimit (1, lastFullFrame, (int) std::floor ((src.onset + tv * sr) / hop));
 
             if (f >= 40.0f && f <= 16000.0f)
-                tailSeconds = std::max (tailSeconds, rt);
+                tailSeconds = std::max (tailSeconds, rtTgt[(size_t) k]);
         }
 
         const int lateLen = std::min ((int) (kMaxIRSeconds * sr), src.onset + (int) (tailSeconds * sr) + N);
@@ -908,7 +1180,7 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
         std::vector<float> capDb ((size_t) capFrames * numBands, kMaxBoostDb);
         for (size_t b = 0; b < numBands && capFrames > 0; ++b)
         {
-            const float rtT = jlimit (0.05f, 120.0f, src.bandRT[b] * scale * decayMultiplier (src.bandFreq[b], p));
+            const float rtT = jlimit (0.05f, 120.0f, decayScaling (src.bandRT[b], src.bandFreq[b]) * decayMultiplier (src.bandFreq[b], p));
             for (int m = 0; m < capFrames; ++m)
             {
                 const float tau = std::max (0.0f, (float) ((m * hop - src.onset) / sr));
@@ -936,34 +1208,38 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
             }
         }
 
-        // Level correction for the synthesised tail: the frames it is calibrated on may sit in a fade-out
-        // or below the decay line. Compare the modified level there with the target line, per band.
-        std::vector<float> synthCorrDb (numBands, 0.0f);
-        for (size_t b = 0; b < numBands && capFrames > 0; ++b)
-        {
-            const float rn = src.bandRT[b];
-            const float rtT = jlimit (0.05f, 120.0f, rn * scale * decayMultiplier (src.bandFreq[b], p));
-            const int vb = jlimit (0, capFrames - 1, (int) std::floor ((src.onset + src.bandValidEnd[b] * sr) / hop));
-            double acc = 0.0; int cnt = 0;
-            for (int m = std::max (0, vb - 5); m <= vb; ++m)
+        auto gainAt = [&] (int m, int k) {
+            float db = std::min (kMaxBoostDb, slopeDb[(size_t) k] * std::max (0.0f, frameTime (m)));
+            if (! capDb.empty() && m < capFrames)
             {
-                const float tau = std::max (0.0f, (float) ((m * hop - src.onset) / sr));
-                const float line = src.bandIntercept[b] - 60.0f * tau / rtT;
-                const float smoothed = smoothDb.empty() ? 0.0f : smoothDb[(size_t) m * numBands + b];
-                const float modified = std::min (src.bandLevelDb[b][(size_t) m] + smoothed + 60.0f * tau * (1.0f / rn - 1.0f / rtT),
-                                                 line + kCapMarginDb);
-                acc += line - modified;
-                ++cnt;
+                const auto& bw = binBand[(size_t) k];
+                const size_t i0 = (size_t) m * numBands + (size_t) bw.first;
+                const size_t i1 = (size_t) m * numBands + (size_t) std::min (bw.first + 1, (int) numBands - 1);
+                if (! smoothDb.empty())
+                    db += smoothDb[i0] * (1.0f - bw.second) + smoothDb[i1] * bw.second;
+                // never lift the measured band level above the target decay line (noise floor, fades)
+                const float cap = capDb[i0] * (1.0f - bw.second) + capDb[i1] * bw.second;
+                db = std::min (db, std::max (cap, std::min (db, 0.0f)));
             }
-            synthCorrDb[b] = cnt > 0 ? jlimit (-6.0f, 18.0f, (float) (acc / cnt)) : 0.0f;
-        }
+            return Decibels::decibelsToGain (db, -400.0f) * staticAmp[(size_t) k];
+        };
 
-        std::vector<float> re ((size_t) bins), im ((size_t) bins);
-        std::vector<float> lateIn ((size_t) len);
+        // The synthesised continuation starts where each bin's measured data ends, on the bin's own decay line
+        // (fitted over the whole late range, so neither the last noisy frames nor the neighbours set its level)
+        // with the modification of that frame, and carries on with the target decay. Its random phases are
+        // mixed per bin so that the channels keep the coherence they have in the recording.
+        const bool haveLines = perBin && src.binMix.size() == (size_t) bins * 10;
+        jassert (haveLines);
+        std::vector<std::complex<float>> phasor ((size_t) kPhaseTableSize);
+        for (int i = 0; i < kPhaseTableSize; ++i)
+            phasor[(size_t) i] = std::polar (1.0f, MathConstants<float>::twoPi * (float) i / (float) kPhaseTableSize);
+
+        std::vector<float> lateIn ((size_t) len), refAmp ((size_t) bins), refTime ((size_t) bins);
         const float synthGain = std::sqrt ((float) N / (float) hop); // incoherent overlap-add compensation
 
-        for (int c : chans)
+        for (size_t ci = 0; ci < chans.size(); ++ci)
         {
+            const int c = chans[ci];
             for (int n = 0; n < len; ++n)
                 lateIn[(size_t) n] = src.ch[(size_t) c][(size_t) n] * (1.0f - earlyWeight (n));
 
@@ -976,65 +1252,24 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
                 stft.forward (lateIn.data(), len, m, Xre.data() + off, Xim.data() + off);
             }
 
-            auto frameTime = [&] (int m) { return (float) ((m * hop - src.onset) / sr); };
-            auto gainAt = [&] (int m, int k) {
-                float db = std::min (kMaxBoostDb, slopeDb[(size_t) k] * std::max (0.0f, frameTime (m)));
-                if (! capDb.empty() && m < capFrames)
-                {
-                    const auto& bw = binBand[(size_t) k];
-                    const size_t i0 = (size_t) m * numBands + (size_t) bw.first;
-                    const size_t i1 = (size_t) m * numBands + (size_t) std::min (bw.first + 1, (int) numBands - 1);
-                    if (! smoothDb.empty())
-                        db += smoothDb[i0] * (1.0f - bw.second) + smoothDb[i1] * bw.second;
-                    // never lift the measured band level above the target decay line (noise floor, fades)
-                    const float cap = capDb[i0] * (1.0f - bw.second) + capDb[i1] * bw.second;
-                    db = std::min (db, std::max (cap, std::min (db, 0.0f)));
-                }
-                return Decibels::decibelsToGain (db, -400.0f) * staticAmp[(size_t) k];
-            };
-
-            // reference power for the synthesised continuation, smoothed over 1/12 octave
-            std::vector<double> ref ((size_t) bins, 0.0), refTime ((size_t) bins, 0.0);
             for (int k = 0; k < bins; ++k)
             {
-                double acc = 0.0, tacc = 0.0; int cnt = 0;
                 const int mv = validFrame[(size_t) k];
-                for (int m = std::max (firstFrame, mv - 5); m <= mv && m < srcFrames; ++m)
-                {
-                    const size_t off = (size_t) (m - firstFrame) * (size_t) bins + (size_t) k;
-                    const double g = gainAt (m, k);
-                    acc += (Xre[off] * Xre[off] + Xim[off] * Xim[off]) * g * g;
-                    tacc += frameTime (m);
-                    ++cnt;
-                }
-                ref[(size_t) k] = cnt > 0 ? acc / cnt : 0.0;
-                refTime[(size_t) k] = cnt > 0 ? tacc / cnt : frameTime (mv);
-            }
-            std::vector<double> prefix ((size_t) bins + 1, 0.0);
-            for (int k = 0; k < bins; ++k) prefix[(size_t) k + 1] = prefix[(size_t) k] + ref[(size_t) k];
-            std::vector<float> refAmp ((size_t) bins);
-            for (int k = 0; k < bins; ++k)
-            {
-                const int w = std::max (2, (int) (k * 0.0595)); // 2^(1/12) - 1
-                const int a = std::max (0, k - w), b = std::min (bins - 1, k + w);
-                refAmp[(size_t) k] = (float) std::sqrt ((prefix[(size_t) b + 1] - prefix[(size_t) a]) / (b - a + 1));
-                if (numBands > 0)
-                {
-                    const auto& bw = binBand[(size_t) k];
-                    const float corr = synthCorrDb[(size_t) bw.first] * (1.0f - bw.second)
-                                     + synthCorrDb[(size_t) std::min (bw.first + 1, (int) numBands - 1)] * bw.second;
-                    refAmp[(size_t) k] *= Decibels::decibelsToGain (corr);
-                }
+                const float tv = frameTime (mv);
+                const float power = haveLines ? src.binPower[(size_t) c][(size_t) k] : 0.0f;
+                refAmp[(size_t) k] = std::sqrt (power * std::pow (10.0f, std::max (-30.0f, -6.0f * tv / rtNat[(size_t) k])))
+                                   * gainAt (mv, k);
+                refTime[(size_t) k] = tv;
             }
 
             // resynthesis
             std::vector<float> y ((size_t) lateLen, 0.0f), norm ((size_t) lateLen, 0.0f);
-            Random rng (0x5eed + 7919 * c);
             for (int m = firstFrame; m < outFrames; ++m)
             {
                 const float t = frameTime (m);
                 const bool haveMeasured = m < srcFrames;
                 const size_t off = haveMeasured ? (size_t) (m - firstFrame) * (size_t) bins : 0;
+                Random rng (0x5eed + 7919 * (int64) m); // per frame: the same draws for every channel
 
                 for (int k = 0; k < bins; ++k)
                 {
@@ -1056,12 +1291,17 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
                     }
                     if (synthWeight > 0.0f && k > 0 && k < bins - 1)
                     {
-                        const float dt = t - (float) refTime[(size_t) k];
                         const float a = synthGain * synthWeight * refAmp[(size_t) k]
-                                      * std::pow (10.0f, -3.0f * dt / rtTgt[(size_t) k]);
-                        const float phase = rng.nextFloat() * MathConstants<float>::twoPi;
-                        yr += a * std::cos (phase);
-                        yi += a * std::sin (phase);
+                                      * std::pow (10.0f, -3.0f * (t - refTime[(size_t) k]) / rtTgt[(size_t) k]);
+                        std::complex<float> z;
+                        const size_t row = (size_t) k * 10 + ci * (ci + 1) / 2;
+                        for (size_t j = 0; j < chans.size(); ++j)
+                        {
+                            const auto& ph = phasor[(size_t) rng.nextInt (kPhaseTableSize)];
+                            if (j <= ci) z += (haveLines ? src.binMix[row + j] : std::complex<float> (j == ci ? 1.0f : 0.0f)) * ph;
+                        }
+                        yr += a * z.real();
+                        yi += a * z.imag();
                     }
                     re[(size_t) k] = yr;
                     im[(size_t) k] = yi;
@@ -1085,8 +1325,8 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     const bool delayOn = p.delayDb > kDelayOffDb + 0.01f;
     const int dd = (int) std::lround (p.delayMs * 0.001 * sr);
     const int voices = delayOn ? 3 : 0;
-    const float gE = p.earlyDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.earlyDb);
-    const float gL = p.lateDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.lateDb);
+    const float gE = p.earlyDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.earlyDb) * levelComp;
+    const float gL = p.lateDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.lateDb) * levelComp;
     const float gD = delayOn ? Decibels::decibelsToGain (p.delayDb) : 0.0f;
 
     const int lateLen = (int) late[(size_t) chans.front()].size();
@@ -1181,7 +1421,7 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     out->rtNative = src.bandRT;
     out->rtTarget.resize (src.bandRT.size());
     for (size_t b = 0; b < src.bandRT.size(); ++b)
-        out->rtTarget[b] = jlimit (0.05f, 120.0f, src.bandRT[b] * scale * decayMultiplier (src.bandFreq[b], p));
+        out->rtTarget[b] = jlimit (0.05f, 120.0f, decayScaling (src.bandRT[b], src.bandFreq[b]) * decayMultiplier (src.bandFreq[b], p));
 
     // ---- modulation: early part, late reverb and its variant as responses of their own
     if (p.splitLate)
