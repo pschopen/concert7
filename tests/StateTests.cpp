@@ -74,7 +74,56 @@ public:
             expect (! knob.setValueFromText ("long"));
             expectWithinAbsoluteError (proc.getAPVTS().getRawParameterValue (ParamID::decay)->load(), 3.4f, 0.01f);
         }
+
+        beginTest ("parameter groups: every parameter has its group");
+        {
+            std::array<int, kNumParamGroups> counts {};
+            for (auto* prm : proc.getParameters())
+                if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
+                {
+                    const auto g = groupOf (rp->paramID);
+                    expect (g != ParamGroup::EQ || rp->paramID.startsWith ("eq"), rp->paramID + " has no group");
+                    ++counts[(size_t) g];
+                }
+            for (int g = 0; g < kNumParamGroups; ++g)
+                expectGreaterThan (counts[(size_t) g], 0, groupKey ((ParamGroup) g));
+        }
+
+        beginTest ("state tree: applying it restores every parameter, kept groups stay");
+        {
+            set (proc, ParamID::decay, 4.0f);
+            set (proc, ParamID::mix, 55.0f);
+            set (proc, ParamID::eqMidGain, 5.0f);
+            set (proc, ParamID::modMode, (float) ModMode::Chorus);
+            auto tree = proc.createStateTree();
+            set (proc, ParamID::decay, 1.0f);
+            set (proc, ParamID::mix, 10.0f);
+            set (proc, ParamID::eqMidGain, -3.0f);
+            set (proc, ParamID::modMode, (float) ModMode::Drift);
+            proc.applyStateTree (tree, groupBit (ParamGroup::Output));
+            expectWithinAbsoluteError (get (proc, ParamID::decay), 4.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), 5.0f, 0.01f);
+            expectEquals (roundToInt (get (proc, ParamID::modMode)), (int) ModMode::Chorus);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 10.0f, 0.01f); // kept
+            proc.applyStateTree (tree);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 55.0f, 0.01f);
+
+            // parameters the tree lacks go to their defaults
+            ValueTree empty (proc.getAPVTS().state.getType());
+            empty.appendChild (tree.getChildWithProperty ("id", ParamID::modMode).createCopy(), nullptr);
+            proc.applyStateTree (empty);
+            expectWithinAbsoluteError (get (proc, ParamID::mix), 30.0f, 0.01f);
+            expectWithinAbsoluteError (get (proc, ParamID::eqMidGain), 0.0f, 0.01f);
+        }
     }
+
+    static void set (Concert7Processor& p, const char* id, float value)
+    {
+        auto* prm = p.getAPVTS().getParameter (id);
+        prm->setValueNotifyingHost (prm->convertTo0to1 (value));
+    }
+
+    static float get (Concert7Processor& p, const char* id) { return p.getAPVTS().getRawParameterValue (id)->load(); }
 };
 
 static StateTest stateTest;

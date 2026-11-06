@@ -52,6 +52,14 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    /** The whole sound: all parameters, the impulse response (presetId) and the distance reference.
+        The project, user presets, A/B and undo are made of it. */
+    juce::ValueTree createStateTree();
+    /** Sets the sound from a tree of createStateTree() (message thread). Parameters it lacks go to their
+        defaults, parameters in the kept groups stay as they are. DECAY is taken from the tree, not from the
+        impulse response. */
+    void applyStateTree (const juce::ValueTree& tree, GroupMask keep = 0);
+
     //==========================================================================
     juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
     SharedState& getShared() { return *shared; }

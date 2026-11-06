@@ -110,6 +110,24 @@ inline constexpr int kNumNoteValues = (int) (sizeof (kNoteValues) / sizeof (kNot
 
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
+/** Groups of parameters that belong together: they can be kept when another preset is chosen, and an edit
+    that couples them (the hall model writes DECAY, the distance mode MIX and DIRECT) stays in its group. */
+enum class ParamGroup
+{
+    Decay = 0, Predelay, Levels, Output, Character, MultiBand, Delay, Modulation, Ducker, EQ, Space,
+    NumGroups
+};
+inline constexpr int kNumParamGroups = (int) ParamGroup::NumGroups;
+using GroupMask = juce::uint32;
+inline constexpr GroupMask groupBit (ParamGroup g) { return GroupMask (1) << (int) g; }
+inline constexpr GroupMask kAllGroups = (GroupMask (1) << kNumParamGroups) - 1;
+
+ParamGroup groupOf (const juce::String& paramID);
+/** Stable key for settings files, e.g. "decay". */
+const char* groupKey (ParamGroup g);
+/** Name for the user interface, e.g. "Pre-delay and offset". */
+juce::String groupName (ParamGroup g);
+
 /** True for parameters that change the impulse response (and therefore need a rebuild). */
 bool isIRParameter (const juce::String& paramID);
 

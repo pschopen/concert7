@@ -3,6 +3,7 @@
 
 #include "Parameters.h"
 #include "dsp/Distance.h"
+#include <map>
 
 namespace concert7
 {
@@ -300,6 +301,54 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (floatParam (ParamID::distMic, "Mic Distance", logRangeWithOff (0.1f, 10.0f), 0.0f, "m", metresOrOff, metresIn));
 
     return layout;
+}
+
+ParamGroup groupOf (const String& id)
+{
+    using G = ParamGroup;
+    static const std::map<String, G> groups {
+        { ParamID::decay, G::Decay },
+        { ParamID::predelay, G::Predelay }, { ParamID::predelaySync, G::Predelay }, { ParamID::predelayNote, G::Predelay },
+        { ParamID::irOffset, G::Predelay },
+        { ParamID::early, G::Levels }, { ParamID::late, G::Levels }, { ParamID::vlf, G::Levels },
+        { ParamID::mix, G::Output }, { ParamID::gain, G::Output },
+        { ParamID::erRolloff, G::Character }, { ParamID::lateRolloff, G::Character }, { ParamID::erPattern, G::Character },
+        { ParamID::crossfeed, G::Character },
+        { ParamID::lowFreq, G::MultiBand }, { ParamID::lowMult, G::MultiBand }, { ParamID::highFreq, G::MultiBand },
+        { ParamID::highMult, G::MultiBand },
+        { ParamID::delayTime, G::Delay }, { ParamID::delaySync, G::Delay }, { ParamID::delayNote, G::Delay },
+        { ParamID::delayLevel, G::Delay },
+        { ParamID::modMode, G::Modulation }, { ParamID::modDepth, G::Modulation }, { ParamID::modRate, G::Modulation },
+        { ParamID::smooth, G::Modulation },
+        { ParamID::duckAmount, G::Ducker }, { ParamID::duckThreshold, G::Ducker }, { ParamID::duckRelease, G::Ducker },
+        { ParamID::duckSidechain, G::Ducker },
+        { ParamID::directHighs, G::Space }, { ParamID::directAir, G::Space }, { ParamID::directWidth, G::Space },
+        { ParamID::directDelay, G::Space }, { ParamID::directGap, G::Space },
+        { ParamID::hallOn, G::Space }, { ParamID::hallVolume, G::Space }, { ParamID::hallAbsorption, G::Space },
+        { ParamID::distOn, G::Space }, { ParamID::distance, G::Space }, { ParamID::distMic, G::Space },
+        { ParamID::distWidth, G::Space },
+    };
+    const auto it = groups.find (id);
+    if (it != groups.end()) return it->second;
+    jassert (id.startsWith ("eq"));
+    return G::EQ;
+}
+
+const char* groupKey (ParamGroup g)
+{
+    static const char* keys[] = { "decay", "predelay", "levels", "output", "character", "multiband", "delay",
+                                  "modulation", "ducker", "eq", "space" };
+    static_assert (std::size (keys) == (size_t) kNumParamGroups);
+    return keys[(size_t) g];
+}
+
+String groupName (ParamGroup g)
+{
+    static const char* names[] = { "Decay", "Pre-delay and offset", "Early, late and VLF levels", "Mix and gain",
+                                   "Roll-off, early pattern, stereo", "Multi-band decay", "Delay",
+                                   "Modulation and smooth", "Ducker", "Post EQ", "Space and direct sound" };
+    static_assert (std::size (names) == (size_t) kNumParamGroups);
+    return names[(size_t) g];
 }
 
 bool isIRParameter (const String& id)

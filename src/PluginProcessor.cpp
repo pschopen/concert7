@@ -804,46 +804,64 @@ const String Concert7Processor::getProgramName (int index)
     return "Default";
 }
 
-void Concert7Processor::getStateInformation (MemoryBlock& destData)
+ValueTree Concert7Processor::createStateTree()
 {
     auto state = apvts.copyState();
     state.setProperty ("presetId", getPresetId(), nullptr);
     state.setProperty ("version", CONCERT7_VERSION, nullptr);
     state.setProperty ("distanceReference", distanceReference.load(), nullptr);
-    if (auto xml = state.createXml())
+    return state;
+}
+
+void Concert7Processor::applyStateTree (const ValueTree& tree, GroupMask keep)
+{
+    const auto id = tree.getProperty ("presetId").toString();
+    // projects from before the modulation modes keep their vibrato
+    const bool hasModMode = tree.getChildWithProperty ("id", ParamID::modMode).isValid();
+    const bool keepSpace = (keep & groupBit (ParamGroup::Space)) != 0;
+    if (! keepSpace)
+        distanceReference = (float) tree.getProperty ("distanceReference", 8.0);
+    // nothing switched on or off here may hand values over afterwards
+    pendingDistance = -1.0f;
+    pendingHallVolume = -1.0f;
+    pendingHallAbsorption = -1.0f;
+    pendingDecay = -1.0f;
+    handbackPending = false;
+    restoringState = true;
+    for (auto* prm : getParameters())
+        if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
+        {
+            if ((keep & groupBit (groupOf (rp->paramID))) != 0) continue;
+            const auto child = tree.getChildWithProperty ("id", rp->paramID);
+            float value = child.isValid() ? rp->convertTo0to1 ((float) child.getProperty ("value"))
+                                          : rp->getDefaultValue();
+            if (rp->paramID == ParamID::modMode && ! hasModMode)
+                value = rp->convertTo0to1 ((float) ModMode::Vibrato);
+            if (rp->getValue() != value)
+                rp->setValueNotifyingHost (value);
+        }
+    restoringState = false;
+    {
+        const ScopedLock sl (statusLock);
+        presetId = id.isNotEmpty() ? id : shared->getDefaultPresetId();
+        pendingNativeDecay = -1.0f; // a build that ran before the restore must not override it
+    }
+    userPresetChange = false; // keep the stored decay
+    requestRebuild();
+    sendChangeMessage();
+}
+
+void Concert7Processor::getStateInformation (MemoryBlock& destData)
+{
+    if (auto xml = createStateTree().createXml())
         copyXmlToBinary (*xml, destData);
 }
 
 void Concert7Processor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
-    {
-        if (! xml->hasTagName (apvts.state.getType())) return;
-        auto tree = ValueTree::fromXml (*xml);
-        const auto id = tree.getProperty ("presetId").toString();
-        // projects from before the modulation modes keep their vibrato
-        const bool hasModMode = tree.getChildWithProperty ("id", ParamID::modMode).isValid();
-        distanceReference = (float) tree.getProperty ("distanceReference", 8.0);
-        pendingDistance = -1.0f;
-        pendingHallVolume = -1.0f;
-        pendingHallAbsorption = -1.0f;
-        pendingDecay = -1.0f;
-        handbackPending = false;
-        restoringState = true;
-        apvts.replaceState (tree);
-        if (! hasModMode)
-            if (auto* p = apvts.getParameter (ParamID::modMode))
-                p->setValueNotifyingHost (p->convertTo0to1 ((float) ModMode::Vibrato));
-        restoringState = false;
-        {
-            const ScopedLock sl (statusLock);
-            presetId = id.isNotEmpty() ? id : shared->getDefaultPresetId();
-            pendingNativeDecay = -1.0f; // a build that ran before the restore must not override it
-        }
-        userPresetChange = false; // keep the stored decay
-        requestRebuild();
-        sendChangeMessage();
-    }
+        if (xml->hasTagName (apvts.state.getType()))
+            applyStateTree (ValueTree::fromXml (*xml));
 }
 
 AudioProcessorEditor* Concert7Processor::createEditor()
