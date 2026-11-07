@@ -806,22 +806,22 @@ void MainPanel::paint (Graphics& g)
         drawScrew (g, pt, 6.0f);
 
     // logo
-    drawLogo (g, 40.0f, 78.0f);
+    drawLogo (g, 40.0f, 64.0f);
     g.setColour (Colours::textDim);
     g.setFont (labelFont (10.0f));
-    g.drawText ("TRUE STEREO REVERB", 42, 88, 220, 14, Justification::left);
+    g.drawText ("TRUE STEREO REVERB", 42, 74, 220, 14, Justification::left);
     g.setColour (Colours::textFaint);
-    g.drawText ("OPEN SOURCE", 42, 104, 220, 14, Justification::left);
+    g.drawText ("OPEN SOURCE", 42, 90, 220, 14, Justification::left);
 
     // power LED
     const bool ok = processor.getShared().hasLibrary();
     g.setColour ((ok ? Colours::ledOn : Colours::warning).withAlpha (0.3f));
-    g.fillEllipse (151.0f, 105.0f, 12.0f, 12.0f);
+    g.fillEllipse (151.0f, 91.0f, 12.0f, 12.0f);
     g.setColour (ok ? Colours::ledOn : Colours::warning);
-    g.fillEllipse (154.0f, 108.0f, 6.0f, 6.0f);
+    g.fillEllipse (154.0f, 94.0f, 6.0f, 6.0f);
     g.setColour (Colours::textFaint);
     g.setFont (labelFont (9.0f));
-    g.drawText (ok ? "READY" : "NO IRS", 168, 105, 80, 12, Justification::left);
+    g.drawText (ok ? "READY" : "NO IRS", 168, 91, 80, 12, Justification::left);
 
     // main section
     drawGroup (g, mainArea.toFloat(), {});
@@ -928,11 +928,11 @@ void MainPanel::resized()
     browseButton.setBounds (gridX + 50, 112, gridW - 100, 34);
     nextButton.setBounds (gridX + gridW - 44, 112, 44, 34);
     // undo / redo and A/B below the logo
-    undoButton.setBounds (40, 122, 44, 26);
-    redoButton.setBounds (88, 122, 44, 26);
-    slotA.setBounds (142, 122, 34, 26);
-    slotB.setBounds (180, 122, 34, 26);
-    copySlot.setBounds (218, 122, 42, 26);
+    undoButton.setBounds (40, 120, 44, 26);
+    redoButton.setBounds (88, 120, 44, 26);
+    slotA.setBounds (142, 120, 34, 26);
+    slotB.setBounds (180, 120, 34, 26);
+    copySlot.setBounds (218, 120, 42, 26);
 
     // main knobs
     mainArea = { 12, kFaceHeight + 12, kWidth - 24, 208 };
