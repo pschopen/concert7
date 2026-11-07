@@ -80,8 +80,15 @@ void PresetDisplay::paint (Graphics& g)
             line3 = readCaption.toUpperCase() + "  " + readValue.toUpperCase();
         if (status.fileRate > 0)
             info = String (status.fileRate / 1000) + "K " + (status.trueStereo ? "TS" : "ST");
+        // CPU modes: low CPU (latency), convolution at half the rate
+        if (status.lowCpu || status.halfRate)
+            info = String (status.lowCpu ? "ECO " : "") + (status.halfRate ? "1/2 " : "") + info;
     }
 
+    // the first line gives way to the information on its right
+    while (info.isNotEmpty() && line1.isNotEmpty()
+           && DotMatrix::textWidth (line1, small) + DotMatrix::textWidth (info, small) + small * 8.0f > inner.getWidth())
+        line1 = line1.dropLastCharacters (1);
     DotMatrix::drawText (g, line1, inner.getX(), inner.getY(), small, on, off);
     if (info.isNotEmpty())
         DotMatrix::drawText (g, info, inner.getRight() - DotMatrix::textWidth (info, small), inner.getY(), small,

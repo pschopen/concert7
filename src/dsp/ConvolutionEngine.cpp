@@ -104,7 +104,7 @@ ConvolutionEngine::~ConvolutionEngine()
     pending->unload();
 }
 
-void ConvolutionEngine::prepare (double sr, int maxBlockSize)
+void ConvolutionEngine::prepare (double sr, int maxBlockSize, int headBlockSize)
 {
     sampleRate = sr;
     maxBlock = std::max (1, maxBlockSize);
@@ -112,7 +112,7 @@ void ConvolutionEngine::prepare (double sr, int maxBlockSize)
     size_t hb = 128;
     while (hb < (size_t) maxBlock && hb < 2048)
         hb *= 2;
-    headBlock = hb;
+    headBlock = headBlockSize > 0 ? (size_t) headBlockSize : hb;
     tailBlock = std::max<size_t> (8192, 4 * headBlock);
 
     history.setSize (2, (int) (kHistorySeconds * sr) + 4 * maxBlock);
@@ -203,6 +203,23 @@ bool ConvolutionEngine::loadIR (std::shared_ptr<const BuiltIR> ir, const std::fu
         pendingIR = ir;
     }
     state.store (Ready, std::memory_order_release);
+    return true;
+}
+
+bool ConvolutionEngine::skipSilence (int n)
+{
+    if (state.load (std::memory_order_acquire) != Idle) return false;
+    // the history goes on (silent), so a response loaded later is warmed up with what really came in
+    const int size = history.getNumSamples();
+    const int64 w = written.load (std::memory_order_relaxed);
+    for (int done = 0; done < n;)
+    {
+        const int idx = (int) ((w + done) % size);
+        const int len = std::min (n - done, size - idx);
+        history.clear (idx, len);
+        done += len;
+    }
+    written.store (w + n, std::memory_order_release);
     return true;
 }
 

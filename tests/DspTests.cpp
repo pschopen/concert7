@@ -3,6 +3,7 @@
 
 #include "TestHelpers.h"
 #include "dsp/ConvolutionEngine.h"
+#include "dsp/Halfband.h"
 #include "dsp/PostProcessing.h"
 #include "Parameters.h"
 
@@ -964,6 +965,71 @@ public:
 };
 
 static ResamplerTest resamplerTest;
+class HalfbandTest : public UnitTest
+{
+public:
+    HalfbandTest() : UnitTest ("Halfband (under-sampling)", "concert7-dsp") {}
+
+    /** Full rate signal -> half rate -> full rate, in blocks of varying (also odd) sizes. */
+    static std::vector<float> roundTrip (const std::vector<float>& x, std::vector<float>* half = nullptr)
+    {
+        HalfbandDecimator dec;
+        HalfbandInterpolator interp;
+        std::vector<float> y (x.size()), h (x.size() / 2 + 8);
+        Random rng (5);
+        size_t pos = 0;
+        while (pos < x.size())
+        {
+            const int n = std::min ((int) (x.size() - pos), 1 + rng.nextInt (300));
+            std::vector<float> tmp ((size_t) n / 2 + 2);
+            const int m = dec.process (x.data() + pos, tmp.data(), n);
+            if (half != nullptr)
+                for (int i = 0; i < m; ++i) half->push_back (tmp[(size_t) i]);
+            interp.process (tmp.data(), y.data() + pos, n);
+            pos += (size_t) n;
+        }
+        return y;
+    }
+
+    void runTest() override
+    {
+        const double sr = 96000.0;
+        beginTest ("the round trip delays by kDelay and keeps the audio band");
+        {
+            std::vector<float> x (48000);
+            for (size_t i = 0; i < x.size(); ++i)
+                x[i] = (float) (0.5 * std::sin (2.0 * MathConstants<double>::pi * 1000.0 * (double) i / sr)
+                                + 0.3 * std::sin (2.0 * MathConstants<double>::pi * 15000.0 * (double) i / sr));
+            const auto y = roundTrip (x);
+            double err = 0.0, ref = 0.0;
+            for (size_t i = 2000; i < x.size(); ++i)
+            {
+                const double d = y[i] - x[i - (size_t) HalfbandFilter::kDelay];
+                err += d * d;
+                ref += (double) x[i] * x[i];
+            }
+            const double snr = 10.0 * std::log10 (ref / std::max (1.0e-30, err));
+            logMessage ("  1 kHz + 15 kHz round trip: " + String (snr, 1) + " dB below the signal");
+            expectGreaterThan (snr, 60.0);
+        }
+
+        beginTest ("the decimator removes what would alias");
+        {
+            std::vector<float> x (48000), half;
+            for (size_t i = 0; i < x.size(); ++i)
+                x[i] = (float) std::sin (2.0 * MathConstants<double>::pi * 30000.0 * (double) i / sr);
+            roundTrip (x, &half);
+            float peak = 0.0f;
+            for (size_t i = 200; i < half.size(); ++i)
+                peak = std::max (peak, std::abs (half[i]));
+            logMessage ("  30 kHz at 96 kHz after halving: " + String (Decibels::gainToDecibels (peak), 1) + " dB");
+            expectLessThan (peak, Decibels::decibelsToGain (-70.0f));
+            expectEquals ((int) half.size(), (int) x.size() / 2);
+        }
+    }
+};
+
+static HalfbandTest halfbandTest;
 static AnalysisTest analysisTest;
 static DesignerTest designerTest;
 static EngineTest engineTest;

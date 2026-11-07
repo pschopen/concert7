@@ -619,5 +619,143 @@ public:
     }
 };
 
+class CpuModesTest : public UnitTest
+{
+public:
+    CpuModesTest() : UnitTest ("Low CPU, under-sampling, silence", "concert7-processor") {}
+
+    static std::unique_ptr<Concert7Processor> make (double sr, bool lowCpu, bool underSample, const char* preset)
+    {
+        auto p = std::make_unique<Concert7Processor>();
+        p->getShared().setIRFolder (irFolder());
+        p->selectPreset (preset, true);
+        p->setLowCpu (lowCpu);
+        p->setUnderSampling (underSample);
+        p->prepareToPlay (sr, 256);
+        setParam (*p, ParamID::mix, 100.0f);
+        setParam (*p, ParamID::modDepth, 0.0f);
+        settle (*p, 256);
+        return p;
+    }
+
+    /** An impulse at sample at (left 1, right 0.5), processed in blocks of the given (also odd) size. */
+    static AudioBuffer<float> impulse (Concert7Processor& p, int len, int block, int at = 0)
+    {
+        AudioBuffer<float> buf (2, len);
+        buf.clear();
+        buf.setSample (0, at, 1.0f);
+        buf.setSample (1, at, 0.5f);
+        MidiBuffer midi;
+        for (int pos = 0; pos < len; pos += block)
+        {
+            AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, pos, std::min (block, len - pos));
+            p.processBlock (view, midi);
+        }
+        return buf;
+    }
+
+    /** Error of b (shifted by lag) against a, in dB below a. */
+    static double errorDb (const AudioBuffer<float>& a, const AudioBuffer<float>& b, int lag, int from, int to)
+    {
+        double err = 0.0, ref = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int i = from; i < to; ++i)
+            {
+                const double x = a.getSample (c, i), y = b.getSample (c, i + lag);
+                err += (y - x) * (y - x);
+                ref += x * x;
+            }
+        return 10.0 * std::log10 (ref / std::max (1.0e-30, err));
+    }
+
+    static double energy (const AudioBuffer<float>& a, int from, int to)
+    {
+        double e = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int i = from; i < to; ++i)
+                e += (double) a.getSample (c, i) * a.getSample (c, i);
+        return e;
+    }
+
+    void runTest() override
+    {
+        beginTest ("low CPU: the same reverb, kLowCpuBlock samples later, and the host is told");
+        if (! irFolder().isDirectory())
+        {
+            logMessage ("  (skipped: no IR folder)");
+            return;
+        }
+        {
+            constexpr int L = Concert7Processor::kLowCpuBlock;
+            auto normal = make (48000.0, false, false, "Halls/01 Large Hall");
+            auto low = make (48000.0, true, false, "Halls/01 Large Hall");
+            expectEquals (low->getLatencySamples(), L);
+            expectEquals (normal->getLatencySamples(), 0);
+            const int len = 3 * 48000;
+            const auto a = impulse (*normal, len, 256);
+            const auto b = impulse (*low, len, 100);
+            const double db = errorDb (a, b, L, 0, len - L);
+            logMessage ("  low CPU against normal: " + String (db, 1) + " dB");
+            expectGreaterThan (db, 80.0);
+        }
+
+        beginTest ("under-sampling at 96 kHz: same level and timing, the same reverb in the audio band");
+        {
+            auto normal = make (96000.0, false, false, "Plates/01 Bright Plate");
+            auto half = make (96000.0, false, true, "Plates/01 Bright Plate");
+            expect (half->isUnderSamplingActive() && ! normal->isUnderSamplingActive());
+            const int len = 2 * 96000;
+            const auto a = impulse (*normal, len, 128);
+            const auto b = impulse (*half, len, 77);
+            const double levelDb = 10.0 * std::log10 (energy (b, 0, len) / energy (a, 0, len));
+            int bestLag = 0;
+            double best = -1000.0;
+            for (int lag = -4; lag <= 4; ++lag)
+                if (const double db = errorDb (a, b, lag, 8, len - 8); db > best) { best = db; bestLag = lag; }
+            logMessage ("  level " + String (levelDb, 2) + " dB, best lag " + String (bestLag) + ", error "
+                        + String (best, 1) + " dB below the reverb");
+            expectWithinAbsoluteError (levelDb, 0.0, 0.3);
+            expectEquals (bestLag, 0);
+            expectGreaterThan (best, 25.0);
+
+            // at 48 kHz it does nothing
+            auto at48 = make (48000.0, false, true, "Plates/01 Bright Plate");
+            expect (! at48->isUnderSamplingActive());
+        }
+
+        beginTest ("silence pauses the convolution, the next sound gets the whole reverb");
+        {
+            auto paused = make (48000.0, false, false, "Rooms/01 Studio A");
+            AudioBuffer<float> silence (2, 512);
+            MidiBuffer midi;
+            const double seconds = paused->getCurrentIR()->seconds;
+            for (int i = 0; i < (int) ((seconds + 1.0) * 48000.0 / 512); ++i)
+            {
+                silence.clear();
+                paused->processBlock (silence, midi);
+            }
+            expect (paused->isConvolutionPaused());
+            const int len = (int) ((seconds + 0.5) * 48000.0);
+            const auto a = impulse (*paused, len, 512, 300);
+            auto fresh = make (48000.0, false, false, "Rooms/01 Studio A");
+            const auto b = impulse (*fresh, len, 512, 300);
+            const double db = errorDb (b, a, 0, 0, len);
+            logMessage ("  after a pause against a fresh instance: " + String (db, 1) + " dB");
+            expectGreaterThan (db, 80.0);
+        }
+
+        beginTest ("low CPU and under-sampling are stored with the project");
+        {
+            auto p = make (48000.0, true, true, "Rooms/01 Studio A");
+            MemoryBlock block;
+            p->getStateInformation (block);
+            Concert7Processor restored;
+            restored.setStateInformation (block.getData(), (int) block.getSize());
+            expect (restored.isLowCpu() && restored.isUnderSampling());
+        }
+    }
+};
+
 static ProcessorTest processorTest;
+static CpuModesTest cpuModesTest;
 } // namespace concert7::test

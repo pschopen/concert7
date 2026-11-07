@@ -92,15 +92,24 @@ bool Concert7Processor::isBusesLayoutSupported (const BusesLayout& layouts) cons
 void Concert7Processor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     abortBuild = true;
+    const bool chunked = lowCpu.load();
+    const bool half = underSampling.load() && sampleRate >= 88200.0;
     {
         std::lock_guard<std::mutex> lk (buildMutex);
         abortBuild = false;
         prepared = false;
 
-        const int block = std::max (16, samplesPerBlock);
+        hostBlockSize = std::max (16, samplesPerBlock);
+        const int block = hostBlockSize;
+        const int convolved = chunked ? kLowCpuBlock : block;   // samples per call of convolve()
+        const int convBlock = half ? convolved / 2 + 2 : convolved;
         currentSampleRate = sampleRate;
         currentBlockSize = block;
-        engine.prepare (sampleRate, block);
+        convolutionRate = half ? sampleRate * 0.5 : sampleRate;
+        lowCpuActive = chunked;
+        underSamplingActive = half;
+        // low CPU: the convolver gets exactly one chunk per call, the head as large as that
+        engine.prepare (convolutionRate.load(), convBlock, chunked ? (half ? kLowCpuBlock / 2 : kLowCpuBlock) : 0);
         eq.prepare (sampleRate);
         modulator.prepare (sampleRate);
         tailModulator.prepare (sampleRate);
@@ -109,6 +118,19 @@ void Concert7Processor::prepareToPlay (double sampleRate, int samplesPerBlock)
         wet.setSize (2, block);
         wetLate.setSize (4, block);
         dry.setSize (4, block); // 0/1 dry input, 2/3 convolver input
+        halfSend.setSize (2, convBlock);
+        halfWet.setSize (2 * WetStreams::kNumStreams, convBlock);
+        for (auto& d : decimators) d.reset();
+        for (auto& i : interpolators) i.reset();
+        chunkIn.setSize (2, chunked ? kLowCpuBlock : 1);
+        chunkOut.setSize (2 * WetStreams::kNumStreams, chunked ? kLowCpuBlock : 1);
+        delayLine.setSize (4, chunked ? kLowCpuBlock : 1);
+        chunkIn.clear();
+        chunkOut.clear();
+        delayLine.clear();
+        chunkPos = 0;
+        silentSamples = 0;
+        convolutionPaused = false;
         dryGainSmooth.reset (sampleRate, 0.03);
         wetGainSmooth.reset (sampleRate, 0.03);
         gainSmooth.reset (sampleRate, 0.03);
@@ -116,13 +138,28 @@ void Concert7Processor::prepareToPlay (double sampleRate, int samplesPerBlock)
         wetGainSmooth.setCurrentAndTargetValue (param (ParamID::mix) * 0.01f);
         gainSmooth.setCurrentAndTargetValue (Decibels::decibelsToGain (param (ParamID::gain)));
         lastBuiltRate = 0.0;
+        recentBuilds.clear();   // built for another rate (or without the under-sampling trim)
         prepared = true;
     }
 
     // build synchronously so the very first block already has the reverb (offline bounces!)
     rebuildRequested = false;
     buildNow();
-    setLatencySamples (0);
+    setLatencySamples (chunked ? kLowCpuBlock : 0);
+}
+
+void Concert7Processor::setLowCpu (bool on)
+{
+    if (lowCpu.exchange (on) == on) return;
+    modesChanged = true;
+    triggerAsyncUpdate();
+}
+
+void Concert7Processor::setUnderSampling (bool on)
+{
+    if (underSampling.exchange (on) == on) return;
+    modesChanged = true;
+    triggerAsyncUpdate();
 }
 
 void Concert7Processor::releaseResources() {}
@@ -131,12 +168,53 @@ double Concert7Processor::getTailLengthSeconds() const
 {
     const auto direct = getDistanceState (false).direct;
     const double extra = 0.001 * (direct.delayMs + direct.gapMs);
+    const double latency = lowCpuActive.load() ? kLowCpuBlock / std::max (1.0, currentSampleRate.load()) : 0.0;
     if (auto ir = engine.getActiveIR())
-        return ir->length() / std::max (1.0, ir->sampleRate) + extra;
-    return 2.0 + extra;
+        return ir->length() / std::max (1.0, ir->sampleRate) + extra + latency;
+    return 2.0 + extra + latency;
 }
 
 //==============================================================================
+void Concert7Processor::convolve (const float* inL, const float* inR, const WetStreams& out, int n, bool crossfeed)
+{
+    // a pause of the input longer than the reverb pauses the convolution
+    const auto range = FloatVectorOperations::findMinAndMax (inL, n).getUnionWith (FloatVectorOperations::findMinAndMax (inR, n));
+    silentSamples = std::max (-range.getStart(), range.getEnd()) < kSilence ? silentSamples + n : 0;
+
+    WetStreams target = out;
+    const float* l = inL;
+    const float* r = inR;
+    int len = n;
+    if (underSamplingActive.load())
+    {
+        // convolve at half the rate
+        float* halfL = halfSend.getWritePointer (0);
+        float* halfR = halfSend.getWritePointer (1);
+        len = decimators[0].process (inL, halfL, n);
+        decimators[1].process (inR, halfR, n);
+        for (size_t i = 0; i < target.ch.size(); ++i)
+            target.ch[i] = halfWet.getWritePointer ((int) i);
+        l = halfL;
+        r = halfR;
+    }
+
+    if (silentSamples > silenceLimit.load (std::memory_order_relaxed) && engine.skipSilence (len))
+    {
+        for (auto* ch : target.ch)
+            FloatVectorOperations::clear (ch, len);
+        convolutionPaused = true;
+    }
+    else
+    {
+        convolutionPaused = false;
+        engine.process (l, r, target, len, crossfeed);
+    }
+
+    if (underSamplingActive.load())
+        for (size_t i = 0; i < target.ch.size(); ++i)
+            interpolators[i].process (target.ch[i], out.ch[i], n);
+}
+
 void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
 {
     ScopedNoDenormals noDenormals;
@@ -149,14 +227,6 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
     if (! prepared || mainOut.getNumChannels() < 2)
     {
         return;
-    }
-
-    if (n > wet.getNumSamples())
-    {
-        // hosts should not exceed the prepared size, but some do
-        wet.setSize (2, n, false, false, true);
-        wetLate.setSize (4, n, false, false, true);
-        dry.setSize (4, n, false, false, true);
     }
 
     // tempo for synced pre-delay / delay
@@ -177,6 +247,19 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
         {
             builder->trigger();
             std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        }
+    }
+
+    if (n > wet.getNumSamples())
+    {
+        // hosts should not exceed the prepared size, but some do
+        wet.setSize (2, n, false, false, true);
+        wetLate.setSize (4, n, false, false, true);
+        dry.setSize (4, n, false, false, true);
+        if (! lowCpuActive.load())
+        {
+            halfSend.setSize (2, n / 2 + 2, false, false, true);
+            halfWet.setSize (2 * WetStreams::kNumStreams, n / 2 + 2, false, false, true);
         }
     }
 
@@ -218,7 +301,41 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
     WetStreams streams;
     streams.ch = { wetL, wetR, wetLate.getWritePointer (0), wetLate.getWritePointer (1),
                    wetLate.getWritePointer (2), wetLate.getWritePointer (3) };
-    engine.process (sendL, sendR, streams, n, crossfeed != Crossfeed::NoCrossfeed);
+
+    if (lowCpuActive.load())
+    {
+        // low CPU: the convolution runs on whole chunks of kLowCpuBlock samples and comes out one chunk later;
+        // the dry signal and the sidechain are delayed by as much, everything else runs on the host's blocks
+        auto sidechain = getBusCount (true) > 1 ? getBusBuffer (buffer, true, 1) : AudioBuffer<float>();
+        float* delayed[] = { dryL, dryR, sidechain.getNumChannels() > 0 ? sidechain.getWritePointer (0) : nullptr,
+                             sidechain.getNumChannels() > 1 ? sidechain.getWritePointer (1) : nullptr };
+        for (int done = 0; done < n;)
+        {
+            const int len = std::min (n - done, kLowCpuBlock - chunkPos);
+            chunkIn.copyFrom (0, chunkPos, sendL + done, len);
+            chunkIn.copyFrom (1, chunkPos, sendR + done, len);
+            for (size_t i = 0; i < streams.ch.size(); ++i)
+                FloatVectorOperations::copy (streams.ch[i] + done, chunkOut.getReadPointer ((int) i, chunkPos), len);
+            for (int ch = 0; ch < 4; ++ch)
+                if (delayed[ch] != nullptr)
+                    std::swap_ranges (delayed[ch] + done, delayed[ch] + done + len, delayLine.getWritePointer (ch, chunkPos));
+            chunkPos += len;
+            done += len;
+            if (chunkPos == kLowCpuBlock)
+            {
+                WetStreams out;
+                for (size_t i = 0; i < out.ch.size(); ++i)
+                    out.ch[i] = chunkOut.getWritePointer ((int) i);
+                convolve (chunkIn.getReadPointer (0), chunkIn.getReadPointer (1), out, kLowCpuBlock,
+                          crossfeed != Crossfeed::NoCrossfeed);
+                chunkPos = 0;
+            }
+        }
+    }
+    else
+    {
+        convolve (sendL, sendR, streams, n, crossfeed != Crossfeed::NoCrossfeed);
+    }
 
     // modulation: Vibrato moves the whole reverb, the other modes only the late reverb (split off in the IR)
     const auto modMode = (ModMode) roundToInt (param (ParamID::modMode));
@@ -486,7 +603,7 @@ void Concert7Processor::buildNow()
         lastBuiltPreset.clear();
     }
 
-    const double sr = currentSampleRate.load();
+    const double sr = convolutionRate.load();
     auto setStatusMessage = [this] (const String& m, bool loading) {
         { const ScopedLock sl (statusLock); status.message = m; status.loading = loading; }
         triggerAsyncUpdate();
@@ -589,7 +706,28 @@ void Concert7Processor::buildNow()
         if (recent.presetId == id && recent.patternId == patternId && std::abs (recent.rate - sr) < 0.5 && recent.params == dp)
             built = recent.ir;
     if (built == nullptr)
+    {
         built = designIR (*source, patternSource.get(), dp);
+        if (underSamplingActive.load())
+        {
+            // halving and doubling the rate delays by HalfbandFilter::kDelay: start the response that much earlier.
+            // Responses are normalised to the same white noise power at the rate they are built for, which
+            // gives them 3 dB more in the audio band at twice the rate: keep the level of the full rate.
+            auto trimmed = std::make_shared<BuiltIR> (*built);
+            constexpr int cut = HalfbandFilter::kDelay / 2;
+            const float gain = std::sqrt (2.0f);
+            for (auto* set : { &trimmed->ch, &trimmed->late, &trimmed->variant })
+                for (auto& c : *set)
+                    if (! c.empty())
+                    {
+                        c.erase (c.begin(), c.begin() + std::min ((int) c.size() - 1, cut));
+                        FloatVectorOperations::multiply (c.data(), gain, (int) c.size());
+                    }
+            trimmed->midEnergy *= 2.0f;
+            trimmed->midEnergyDiagonal *= 2.0f;
+            built = trimmed;
+        }
+    }
     if (! engine.loadIR (built, [this] { return abortBuild.load() || builder->threadShouldExit(); }))
         return;
     if (auto previous = std::find_if (recentBuilds.begin(), recentBuilds.end(), [&] (auto& r) { return r.ir == built; });
@@ -598,6 +736,9 @@ void Concert7Processor::buildNow()
     recentBuilds.insert (recentBuilds.begin(), { id, patternId, sr, dp, built });
     if (recentBuilds.size() > kRecentBuilds) recentBuilds.resize (kRecentBuilds);
 
+    // silent input for longer than the response (and the crossfade) pauses the convolution
+    silenceLimit = (int64) ((built->length() / built->sampleRate + 2.0 * ConvolutionEngine::kCrossfadeSeconds)
+                            * currentSampleRate.load());
     irMidEnergy = built->midEnergy;
     irMidEnergyDiagonal = built->midEnergyDiagonal;
     irOnsetMs = built->onsetMs;
@@ -629,6 +770,14 @@ bool Concert7Processor::waitUntilIdle (int timeoutMs)
 
 void Concert7Processor::handleAsyncUpdate()
 {
+    // low CPU / under-sampling switched: prepare again (the host gets the new latency)
+    if (modesChanged.exchange (false) && prepared.load() && currentSampleRate.load() > 0.0)
+    {
+        suspendProcessing (true);
+        prepareToPlay (currentSampleRate.load(), hostBlockSize);
+        suspendProcessing (false);
+    }
+
     float pending = -1.0f;
     {
         const ScopedLock sl (statusLock);
@@ -905,6 +1054,8 @@ Concert7Processor::Status Concert7Processor::getStatus() const
     if (notice.isNotEmpty() && Time::getMillisecondCounter() < noticeUntil && s.message.isEmpty())
         s.message = notice;
     s.userPresetName = userPresetName;
+    s.lowCpu = lowCpuActive.load();
+    s.halfRate = underSamplingActive.load();
     if (userPresetName.isNotEmpty() && ! userPresetValues.empty())
     {
         s.userPresetModified = presetId != userPresetIR;
@@ -1063,6 +1214,8 @@ void Concert7Processor::getStateInformation (MemoryBlock& destData)
 {
     auto state = createStateTree();
     state.setProperty ("abSlot", abSlot, nullptr);
+    state.setProperty ("lowCpu", lowCpu.load(), nullptr);
+    state.setProperty ("underSampling", underSampling.load(), nullptr);
     if (auto other = abSlots[(size_t) (1 - abSlot)]; other.isValid())
     {
         ValueTree slot ("OtherABSlot");
@@ -1080,6 +1233,8 @@ void Concert7Processor::setStateInformation (const void* data, int sizeInBytes)
         {
             auto tree = ValueTree::fromXml (*xml);
             abSlot = jlimit (0, 1, (int) tree.getProperty ("abSlot", 0));
+            setLowCpu ((bool) tree.getProperty ("lowCpu", false));
+            setUnderSampling ((bool) tree.getProperty ("underSampling", false));
             if (MessageManager::existsAndIsCurrentThread())
                 history->useSlot (abSlot);
             abSlots = {};

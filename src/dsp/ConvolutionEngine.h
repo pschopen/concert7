@@ -77,7 +77,8 @@ public:
     ConvolutionEngine();
     ~ConvolutionEngine();
 
-    void prepare (double sampleRate, int maxBlockSize);
+    /** headBlockSize 0: chosen from the block size. Fixed blocks of a larger size (low CPU) use less CPU. */
+    void prepare (double sampleRate, int maxBlockSize, int headBlockSize = 0);
 
     /** Worker thread: blocks until the engine can take a new IR (or timeout).
         Returns false if it gave up (e.g. shouldAbort returned true). */
@@ -85,6 +86,11 @@ public:
 
     /** Audio thread. Inputs may alias each other. Outputs are overwritten. */
     void process (const float* inL, const float* inR, const WetStreams& out, int numSamples, bool crossfeed);
+
+    /** Audio thread: n samples of silent input, without convolving. The convolvers hold only silence by
+        then (the input was silent for longer than the response), so they simply pause. Returns false while a
+        new response is being handed over: then the samples must be processed. */
+    bool skipSilence (int n);
 
     /** Audio thread. The streams summed without modulation: the whole response (variants are left out). */
     void process (const float* inL, const float* inR, float* outL, float* outR, int numSamples, bool crossfeed);

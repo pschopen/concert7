@@ -9,12 +9,15 @@
 //   concert7-dev ir       --out IR.wav [--preset ID] [--set id=value ...] [--sr RATE]
 //   concert7-dev snapshot --out UI.png [--tab 0..4] [--welcome] [--preset ID] [--scale S] [--keep decay,output]
 //                         [--browser SEARCH]
-//   concert7-dev bench    [--preset ID] [--seconds S] [--block N] [--set ...]
+//   concert7-dev bench    [--preset ID] [--seconds S] [--block N] [--sr RATE] [--lowcpu] [--undersample] [--realtime] [--set ...]
 //   concert7-dev presets  [--irs DIR]            (lists presets with their analysed reverb times)
 //   concert7-dev analyze  --preset ID [--sr RATE] (per band analysis of one preset)
 
 #include "TestHelpers.h"
 #include <iostream>
+#if ! JUCE_WINDOWS
+ #include <sys/resource.h>
+#endif
 
 namespace concert7::test { bool setAudioUnitOfflineRender (void* audioUnit, bool offline); }
 #include "PluginProcessor.h"
@@ -93,6 +96,8 @@ namespace
             proc->getShared().setIRFolder (test::irFolder());
         if (hasArg (args, "--preset"))
             proc->selectPreset (argValue (args, "--preset"), userPreset);
+        proc->setLowCpu (hasArg (args, "--lowcpu"));
+        proc->setUnderSampling (hasArg (args, "--undersample"));
         proc->prepareToPlay (sr, block);
         settle (*proc, block);
         applySettings (*proc, args);
@@ -251,7 +256,7 @@ namespace
 
     int bench (const ArgumentList& args)
     {
-        const double sr = 48000.0;
+        const double sr = argValue (args, "--sr", "48000").getDoubleValue();
         const int block = argValue (args, "--block", "128").getIntValue();
         const double seconds = argValue (args, "--seconds", "20").getDoubleValue();
         auto proc = makeProcessor (args, sr, block);
@@ -260,6 +265,18 @@ namespace
         MidiBuffer midi;
         Random rng (2);
         double worst = 0.0;
+        const bool realtime = hasArg (args, "--realtime");
+        // CPU time of the whole process: the tail convolution runs on background threads
+        auto processCpuSeconds = [] {
+           #if JUCE_WINDOWS
+            return 0.0;
+           #else
+            rusage u {};
+            getrusage (RUSAGE_SELF, &u);
+            return (double) u.ru_utime.tv_sec + u.ru_utime.tv_usec * 1.0e-6 + (double) u.ru_stime.tv_sec + u.ru_stime.tv_usec * 1.0e-6;
+           #endif
+        };
+        const auto cpu0 = processCpuSeconds();
         const auto t0 = Time::getMillisecondCounterHiRes();
         for (int pos = 0; pos < total; pos += block)
         {
@@ -267,12 +284,17 @@ namespace
             const auto b0 = Time::getMillisecondCounterHiRes();
             proc->processBlock (buf, midi);
             worst = std::max (worst, Time::getMillisecondCounterHiRes() - b0);
+            if (realtime) // paced like an audio device: background threads get the time they have there
+                while (Time::getMillisecondCounterHiRes() < t0 + (pos + block) * 1000.0 / sr)
+                    Thread::sleep (0);
         }
         const double ms = Time::getMillisecondCounterHiRes() - t0;
         const double blockMs = block / sr * 1000.0;
         std::cout << "IR length " << proc->getCurrentIR()->seconds << " s, block " << block << "\n"
                   << "average CPU " << 100.0 * (ms / 1000.0) / seconds << " % of one core, worst block "
-                  << worst << " ms (" << 100.0 * worst / blockMs << " % of the block period)" << std::endl;
+                  << worst << " ms (" << 100.0 * worst / blockMs << " % of the block period)\n"
+                  << "process CPU (all threads) " << 100.0 * (processCpuSeconds() - cpu0) / seconds
+                  << " % of one core" << std::endl;
         return 0;
     }
 

@@ -13,6 +13,7 @@
 #include "SharedState.h"
 #include "dsp/ConvolutionEngine.h"
 #include "dsp/Distance.h"
+#include "dsp/Halfband.h"
 #include "dsp/IRDesigner.h"
 #include "dsp/PostProcessing.h"
 
@@ -112,6 +113,7 @@ public:
         bool trueStereo = false;
         juce::String userPresetName;   // a user preset is loaded
         bool userPresetModified = false;
+        bool lowCpu = false, halfRate = false;   // as prepared
     };
     Status getStatus() const;
     std::shared_ptr<const BuiltIR> getCurrentIR() const { return engine.getActiveIR(); }
@@ -120,6 +122,19 @@ public:
     float getDuckReductionDb() const { return ducker.getGainReductionDb(); }
     double getHostBpm() const { return bpm.load(); }
     double getSampleRateForUI() const { return currentSampleRate.load(); }
+
+    /** Low CPU: everything runs in blocks of kLowCpuBlock samples, so the convolution can use large blocks.
+        Adds that much latency (reported to the host). Stored with the project. */
+    static constexpr int kLowCpuBlock = 4096;
+    bool isLowCpu() const { return lowCpu.load(); }
+    void setLowCpu (bool on);
+    /** Under-sampling: at 88.2 kHz and above the reverb is convolved at half the sample rate (the impulse
+        responses hold nothing above 22 / 24 kHz). Stored with the project. */
+    bool isUnderSampling() const { return underSampling.load(); }
+    void setUnderSampling (bool on);
+    bool isUnderSamplingActive() const { return underSamplingActive.load(); }
+    /** Silent input longer than the reverb pauses the convolution (CPU). */
+    bool isConvolutionPaused() const { return convolutionPaused.load(); }
 
     /** Waits until all pending IR work is done (tests / offline rendering). */
     bool waitUntilIdle (int timeoutMs);
@@ -161,6 +176,8 @@ private:
     void parameterChanged (const juce::String& id, float value) override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void handleAsyncUpdate() override;
+    /** The convolution of n host rate samples: under-sampled when active, paused after a long silence. */
+    void convolve (const float* inL, const float* inR, const WetStreams& out, int n, bool crossfeed);
     void requestRebuild();
     void resetParameters();
     void applyParameters (const juce::ValueTree& tree, GroupMask keep, bool skipDecay);
@@ -197,6 +214,21 @@ private:
     DirectSettings readDirectSettings() const;   // MIX and DIRECT (or the values being handed back)
     std::array<std::atomic<float>, 6> pendingDirect {};  // values handed back when distance is switched off
     std::atomic<bool> handbackPending { false };
+
+    std::atomic<bool> lowCpu { false }, underSampling { false }, modesChanged { false };
+    // as prepared (audio side)
+    std::atomic<bool> lowCpuActive { false }, underSamplingActive { false }, convolutionPaused { false };
+    std::atomic<double> convolutionRate { 0.0 };   // the rate of the impulse responses (half the rate: under-sampling)
+    int hostBlockSize = 512;
+    // low CPU: convolver input and output (one chunk late), dry signal and sidechain delayed by a chunk
+    juce::AudioBuffer<float> chunkIn, chunkOut, delayLine;
+    int chunkPos = 0;
+    juce::AudioBuffer<float> halfSend, halfWet;     // under-sampling: convolver input and streams at half the rate
+    std::array<HalfbandDecimator, 2> decimators;
+    std::array<HalfbandInterpolator, 2 * WetStreams::kNumStreams> interpolators;
+    juce::int64 silentSamples = 0;                  // input below kSilence for this long (host samples)
+    std::atomic<juce::int64> silenceLimit { std::numeric_limits<juce::int64>::max() };  // ... pauses the convolution
+    static constexpr float kSilence = 1.0e-5f;      // -100 dB
 
     std::atomic<double> currentSampleRate { 0.0 };
     std::atomic<int> currentBlockSize { 0 };

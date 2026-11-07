@@ -232,7 +232,7 @@ MainPanel::MainPanel (Concert7Processor& p)
     updateHistoryButtons();
 
     setupButton.onClick = [this] { showSetupMenu(); };
-    setupButton.setTooltip ("Impulse response library, interface size, settings kept on preset change, reset");
+    setupButton.setTooltip ("Impulse response library, interface size, settings kept on preset change, CPU modes, reset");
     addAndMakeVisible (setupButton);
 
     // reverb page
@@ -528,6 +528,10 @@ void MainPanel::showSetupMenu()
                        std::abs (shared.getUIScale() - scales[i]) < 0.01f);
     menu.addSubMenu ("Interface size", sizes);
     menu.addSeparator();
+    menu.addSectionHeader ("CPU (THIS INSTANCE)");
+    menu.addItem (7, "Low CPU (adds " + String (Concert7Processor::kLowCpuBlock) + " samples latency)", true, processor.isLowCpu());
+    menu.addItem (8, "Half rate convolution at 88.2 kHz and above", true, processor.isUnderSampling());
+    menu.addSeparator();
     menu.addItem (5, "Reset all parameters");
     menu.addItem (6, "About Concert7...");
 
@@ -552,6 +556,8 @@ void MainPanel::showSetupMenu()
                                 if (onScaleChange) onScaleChange (chosen[r - 10]);
                             }
                             else if (r == 5) processor.selectPreset (processor.getPresetId(), true);
+                            else if (r == 7) processor.setLowCpu (! processor.isLowCpu());
+                            else if (r == 8) processor.setUnderSampling (! processor.isUnderSampling());
                             else if (r == 6)
                             {
                                 AlertWindow::showMessageBoxAsync (
