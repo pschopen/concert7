@@ -52,7 +52,11 @@ Concert7Processor::Concert7Processor()
 
     history = std::make_unique<EditHistory> (*this);
     shared->addChangeListener (this);
-    presetId = shared->getDefaultPresetId();
+    // the library chosen last, or one that is there
+    library = shared->getPreferredOrigin();
+    for (auto origin : { library, IROrigin::Combined, IROrigin::Split, IROrigin::User })
+        if (shared->hasLibrary (origin)) { library = origin; break; }
+    setPresetIdLocked (shared->getDefaultPresetId (library));
     userPresetChange = true; // first preset starts at its native decay
 
     builder = std::make_unique<Builder> (*this);
@@ -611,10 +615,11 @@ void Concert7Processor::buildNow()
     };
 
     String id;
-    { const ScopedLock sl (statusLock); id = presetId; }
+    IROrigin origin;
+    { const ScopedLock sl (statusLock); id = presetId; origin = library; }
     if (id.isEmpty() || shared->indexOfPreset (id) < 0)
     {
-        const auto fallback = shared->getDefaultPresetId();
+        const auto fallback = shared->getDefaultPresetId (origin);
         if (fallback.isEmpty())
         {
             setStatusMessage (shared->getIRFolder() == File() ? "No IR folder - see setup" : "No impulse responses found", false);
@@ -625,7 +630,8 @@ void Concert7Processor::buildNow()
         if (id.isEmpty()) userPresetChange = true;
         id = fallback;
         const ScopedLock sl (statusLock);
-        presetId = id;
+        setPresetIdLocked (id);
+        origin = library;
     }
 
     // ---- source impulse response
@@ -663,6 +669,7 @@ void Concert7Processor::buildNow()
         const ScopedLock sl (statusLock);
         status.presetName = preset.name;
         status.category = preset.category;
+        status.origin = preset.origin;
         status.number = preset.displayNumber();
         status.nativeRT = loaded->nativeRT;
         status.fileRate = loaded->fileRate;
@@ -671,7 +678,7 @@ void Concert7Processor::buildNow()
 
     // ---- early reflection pattern
     const int pattern = roundToInt (param (ParamID::erPattern));
-    const String patternId = pattern > 0 ? shared->getPresetIdForErPattern (pattern) : String();
+    const String patternId = pattern > 0 ? shared->getPresetIdForErPattern (pattern, origin) : String();
     if (patternId.isEmpty())
         patternSource.reset();
     else if (patternSource == nullptr || patternSource->presetId != patternId || std::abs (patternSource->sampleRate - sr) > 0.5)
@@ -878,7 +885,8 @@ void Concert7Processor::changeListenerCallback (ChangeBroadcaster*)
     sourcesInvalid = true;
     if (shared->indexOfPreset (getPresetId()) < 0)
     {
-        { const ScopedLock sl (statusLock); presetId = shared->getDefaultPresetId(); }
+        const auto fallback = shared->getDefaultPresetId (getLibrary());
+        { const ScopedLock sl (statusLock); setPresetIdLocked (fallback); }
         userPresetChange = true;
     }
     requestRebuild();
@@ -892,11 +900,13 @@ void Concert7Processor::selectPreset (const String& id, bool userAction)
     if (undoable)
     {
         IRPreset p;
-        history->beginAction (shared->getPreset (id, p) ? p.category + " " + p.displayNumber() + " " + p.name : id);
+        history->beginAction (shared->getPreset (id, p) ? (p.origin == IROrigin::Split ? "LS " : p.origin == IROrigin::User ? "OTHER " : "")
+                                                              + p.bankName() + " " + p.displayNumber() + " " + p.name
+                                                        : id);
     }
     {
         const ScopedLock sl (statusLock);
-        presetId = id;
+        setPresetIdLocked (id);
     }
     if (userAction)
     {
@@ -908,6 +918,42 @@ void Concert7Processor::selectPreset (const String& id, bool userAction)
     sendChangeMessage();
     if (undoable)
         history->endAction();
+}
+
+void Concert7Processor::setPresetIdLocked (const String& id)
+{
+    presetId = id;
+    if (id.isNotEmpty())
+        library = IRLibrary::originOfId (id);
+}
+
+IROrigin Concert7Processor::getLibrary() const
+{
+    const ScopedLock sl (statusLock);
+    return library;
+}
+
+bool Concert7Processor::switchLibrary (IROrigin target)
+{
+    if (! shared->hasLibrary (target)) return false;
+    shared->setPreferredOrigin (target);
+    if (target == getLibrary()) return true;
+
+    // the same preset in the other M7 library, else the first of its category there, else the library's first
+    const auto current = getPresetId();
+    auto next = shared->getCounterpart (current, target);
+    IRPreset p;
+    if (next.isEmpty() && shared->getPreset (current, p))
+        shared->withLibrary ([&] (const IRLibrary& lib) {
+            for (auto& q : lib.getPresets())
+                if (q.origin == target && q.category == p.category) { next = q.id; break; }
+        });
+    if (next.isEmpty())
+        next = shared->getDefaultPresetId (target);
+
+    // like choosing the preset: its own settings and decay, except for the kept groups
+    selectPreset (next, true);
+    return true;
 }
 
 bool Concert7Processor::hasPendingHandover() const
@@ -942,7 +988,7 @@ void Concert7Processor::restoreValues (const std::vector<std::pair<RangedAudioPa
     distanceReference = reference;
     {
         const ScopedLock sl (statusLock);
-        presetId = id;
+        setPresetIdLocked (id);
         pendingNativeDecay = -1.0f;
     }
     userPresetChange = false;
@@ -1026,13 +1072,17 @@ void Concert7Processor::applyParameters (const ValueTree& tree, GroupMask keep, 
 
 void Concert7Processor::selectPresetByOffset (int delta)
 {
-    const int num = shared->getNumPresets();
+    const auto origin = getLibrary();
+    StringArray ids;
+    shared->withLibrary ([&] (const IRLibrary& lib) {
+        for (auto& p : lib.getPresets())
+            if (p.origin == origin) ids.add (p.id);
+    });
+    const int num = ids.size();
     if (num == 0) return;
-    int idx = shared->indexOfPreset (getPresetId());
+    int idx = ids.indexOf (getPresetId());
     idx = ((idx < 0 ? 0 : idx + delta) % num + num) % num;
-    IRPreset p;
-    if (shared->getPresetAt (idx, p))
-        selectPreset (p.id, true);
+    selectPreset (ids[idx], true);
 }
 
 String Concert7Processor::getPresetId() const
@@ -1162,7 +1212,8 @@ const String Concert7Processor::getProgramName (int index)
 {
     IRPreset p;
     if (shared->getPresetAt (index, p))
-        return p.category + " " + p.displayNumber() + " " + p.name;
+        return (p.origin == IROrigin::Split ? "LS " : p.origin == IROrigin::User ? "OTHER " : "") + p.bankName() + " "
+             + p.displayNumber() + " " + p.name;
     return "Default";
 }
 
@@ -1191,7 +1242,7 @@ void Concert7Processor::applyStateTree (const ValueTree& tree, GroupMask keep)
     applyParameters (tree, keep, false);
     {
         const ScopedLock sl (statusLock);
-        presetId = id.isNotEmpty() ? id : shared->getDefaultPresetId();
+        setPresetIdLocked (id.isNotEmpty() ? id : shared->getDefaultPresetId (library));
         pendingNativeDecay = -1.0f; // a build that ran before the restore must not override it
     }
     userPresetChange = false; // keep the stored decay

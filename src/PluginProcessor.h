@@ -69,8 +69,16 @@ public:
     /** Selects a library preset. userAction = true (also when the current preset is chosen again)
         resets all parameters to their defaults and decay to the preset's native time. */
     void selectPreset (const juce::String& presetId, bool userAction);
+    /** Steps through the presets of the library in use. */
     void selectPresetByOffset (int delta);
     juce::String getPresetId() const;
+
+    /** The library in use (SAM / LS / OTHER): the one of the current preset. */
+    IROrigin getLibrary() const;
+    /** Switches to the same preset in the other M7 library, else to the first of its category there, else to the
+        library's first. Like choosing a preset: one undo step, its own settings and decay except for the kept
+        groups. False when that library is not installed. Message thread. */
+    bool switchLibrary (IROrigin target);
 
     /** Undo / redo of the user's edits (kept while the editor is closed, not stored with the project). */
     EditHistory& getHistory() { return *history; }
@@ -104,7 +112,8 @@ public:
     /** Status for the user interface. */
     struct Status
     {
-        juce::String presetName, category, number;
+        juce::String presetName, category, number;   // number with the bank: "2.05" is Halls 2, preset 5
+        IROrigin origin = IROrigin::Combined;
         juce::String message;         // errors / loading info
         bool loading = false;
         bool hasIR = false;
@@ -247,6 +256,9 @@ private:
 
     mutable juce::CriticalSection statusLock;
     juce::String presetId;
+    IROrigin library = IROrigin::Combined;
+    /** Sets presetId and with it the library (statusLock held). */
+    void setPresetIdLocked (const juce::String& id);
     // the user preset in use and its values (0..1, NaN = not compared: a kept group) to show changes
     juce::String userPresetKey, userPresetName, userPresetIR;
     std::vector<float> userPresetValues;

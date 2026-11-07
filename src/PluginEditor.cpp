@@ -153,7 +153,7 @@ namespace
             { "Ambiences", "Very short reverb that adds space without an audible tail." },
             { "Spaces", "Real places - churches, a scoring stage, an arena, a car park, a cavern, outdoor spaces - "
                         "and a gated reverb." },
-            { "User", "Your own impulse responses from the IR folder (WAV, AIFF, FLAC)." },
+            { "User", "Your own impulse responses (WAV, AIFF, FLAC) that are not in a subfolder." },
         };
         const auto it = tips.find (category);
         return it != tips.end() ? it->second : "Presets in " + category;
@@ -232,6 +232,26 @@ MainPanel::MainPanel (Concert7Processor& p)
         b->getProperties().set ("led", true);
     setWantsKeyboardFocus (true); // Cmd/Ctrl+Z, Shift+Cmd+Z / Ctrl+Y
     updateHistoryButtons();
+
+    // the library: two M7 libraries (the same presets where both have them) and any other impulse responses
+    samButton.setTooltip ("M7 library with one response per preset (see SETUP). Switches to the same preset, "
+                          "with its own settings except for the kept ones.");
+    lsButton.setTooltip ("M7 library with the early reflections and the late reverb recorded on their own, the second "
+                         "banks and Nonlin too (see SETUP). Switches to the same preset, with its own settings except "
+                         "for the kept ones.");
+    otherButton.setTooltip ("Any other impulse responses: another library or your own (see SETUP). Subfolders are "
+                            "the categories.");
+    for (auto* b : { &samButton, &lsButton, &otherButton })
+    {
+        b->getProperties().set ("fontHeight", 10.5f);
+        b->getProperties().set ("folderTab", true);
+        b->setClickingTogglesState (false);
+        addAndMakeVisible (*b);
+    }
+    samButton.onClick = [this] { chooseLibrary (IROrigin::Combined); };
+    lsButton.onClick = [this] { chooseLibrary (IROrigin::Split); };
+    otherButton.onClick = [this] { chooseLibrary (IROrigin::User); };
+    updateLibraryButtons();
 
     setupButton.onClick = [this] { showSetupMenu(); };
     setupButton.setTooltip ("Impulse response library, interface size, settings kept on preset change, CPU modes, reset");
@@ -484,13 +504,16 @@ void MainPanel::touch (Knob& k)
 void MainPanel::rebuildCategoryButtons()
 {
     categories.clear();
-    processor.getShared().withLibrary ([this] (const IRLibrary& lib) { categories = lib.getCategories(); });
+    shownLibrary = processor.getLibrary();
+    processor.getShared().withLibrary ([this] (const IRLibrary& lib) { categories = lib.getCategories (shownLibrary); });
     if (categories.isEmpty())
         categories = StringArray { "Halls", "Plates", "Rooms", "Chambers", "Ambiences", "Spaces" };
 
     categoryButtons.clear();
-    for (auto& c : categories)
+    const bool more = categories.size() > kMaxCategoryButtons;
+    for (int i = 0; i < categories.size() && i < (more ? kMaxCategoryButtons - 1 : kMaxCategoryButtons); ++i)
     {
+        const auto c = categories[i];
         auto b = std::make_unique<TextButton> (IRLibrary::shortCategoryName (c));
         b->getProperties().set ("led", true);
         b->getProperties().set ("fontHeight", 10.5f);
@@ -499,7 +522,40 @@ void MainPanel::rebuildCategoryButtons()
         addAndMakeVisible (*b);
         categoryButtons.push_back (std::move (b));
     }
+    if (more)
+    {
+        auto b = std::make_unique<TextButton> ("MORE");
+        b->getProperties().set ("led", true);
+        b->getProperties().set ("fontHeight", 10.5f);
+        b->setTooltip ("The other categories");
+        b->onClick = [this, ptr = b.get()] { showMoreCategoriesMenu (ptr); };
+        addAndMakeVisible (*b);
+        categoryButtons.push_back (std::move (b));
+    }
+    lastPresetId.clear(); // the lit category is set again
     resized();
+}
+
+void MainPanel::updateLibraryButtons()
+{
+    const auto library = processor.getLibrary();
+    samButton.setToggleState (library == IROrigin::Combined, dontSendNotification);
+    lsButton.setToggleState (library == IROrigin::Split, dontSendNotification);
+    otherButton.setToggleState (library == IROrigin::User, dontSendNotification);
+}
+
+void MainPanel::chooseLibrary (IROrigin library)
+{
+    // a library that is not installed yet: the setup shows how to get it
+    if (! processor.switchLibrary (library))
+    {
+        showWelcome (true);
+        if (welcome != nullptr) welcome->showLibrary (library);
+        return;
+    }
+    updateLibraryButtons();
+    rebuildCategoryButtons();
+    browser.refresh();
 }
 
 void MainPanel::showCategoryMenu (const String& category, Component* target)
@@ -511,13 +567,51 @@ void MainPanel::showCategoryMenu (const String& category, Component* target)
     }
     PopupMenu menu;
     const auto current = processor.getPresetId();
+    const auto library = processor.getLibrary();
     processor.getShared().withLibrary ([&] (const IRLibrary& lib) {
         const auto& presets = lib.getPresets();
+        int bank = 0;
         for (size_t i = 0; i < presets.size(); ++i)
         {
             const auto& p = presets[i];
-            if (p.category == category)
-                menu.addItem ((int) i + 1, p.displayNumber() + "  " + p.name, true, p.id == current);
+            if (p.category != category || p.origin != library) continue;
+            // split captures: the M7's second bank of the category below the first
+            if (p.origin == IROrigin::Split && p.bank != bank)
+            {
+                if (bank != 0 || p.bank >= 2) menu.addSectionHeader (IRLibrary::shortCategoryName (p.bankName()));
+                bank = p.bank;
+            }
+            menu.addItem ((int) i + 1, p.displayNumber() + "  " + p.name, true, p.id == current);
+        }
+    });
+    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (target).withMinimumWidth (220),
+                        [this, safe = SafePointer<MainPanel> (this)] (int result) {
+                            if (safe == nullptr) return;
+                            IRPreset p;
+                            if (result > 0 && processor.getShared().getPresetAt (result - 1, p))
+                                processor.selectPreset (p.id, true);
+                        });
+}
+
+void MainPanel::showMoreCategoriesMenu (Component* target)
+{
+    // the categories without a button of their own, each with its presets
+    PopupMenu menu;
+    const auto current = processor.getPresetId();
+    const auto library = processor.getLibrary();
+    processor.getShared().withLibrary ([&] (const IRLibrary& lib) {
+        const auto& presets = lib.getPresets();
+        for (int c = kMaxCategoryButtons - 1; c < categories.size(); ++c)
+        {
+            PopupMenu sub;
+            bool lit = false;
+            for (size_t i = 0; i < presets.size(); ++i)
+                if (presets[i].origin == library && presets[i].category == categories[c])
+                {
+                    sub.addItem ((int) i + 1, presets[i].displayNumber() + "  " + presets[i].name, true, presets[i].id == current);
+                    lit = lit || presets[i].id == current;
+                }
+            menu.addSubMenu (categories[c], sub, true, nullptr, lit);
         }
     });
     menu.showMenuAsync (PopupMenu::Options().withTargetComponent (target).withMinimumWidth (220),
@@ -554,6 +648,11 @@ void MainPanel::showSetupMenu()
     const auto folder = shared.getIRFolder();
     menu.addSectionHeader ("IMPULSE RESPONSES");
     menu.addItem (100, folder == File() ? String ("No folder selected") : folder.getFullPathName(), false);
+    const auto splitFolder = shared.getSplitFolder(), ownFolder = shared.getOwnFolder();
+    if (splitFolder != File())
+        menu.addItem (101, "LS: " + splitFolder.getFullPathName(), false);
+    if (ownFolder != File())
+        menu.addItem (102, "OTHER: " + ownFolder.getFullPathName(), false);
     menu.addItem (1, "Choose IR folder...");
     menu.addItem (2, "Install impulse responses (ZIP)...");
     menu.addItem (3, "Rescan library");
@@ -608,9 +707,9 @@ void MainPanel::showSetupMenu()
                                     MessageBoxIconType::NoIcon, "Concert7 " CONCERT7_VERSION,
                                     "Open source true stereo convolution reverb (GPL-3.0).\n\n"
                                     "Built on the REEV-R convolution engine by tiagolr and the FFTConvolver library by HiFi-LoFi.\n\n"
-                                    "Impulse responses: Bricasti M7 library by Samplicity (download separately).\n"
+                                    "Impulse responses are not included; the setup shows libraries Concert7 is tested with.\n"
                                     "Bricasti and M7 are trademarks of their respective owner; "
-                                    "Concert7 is not affiliated with Bricasti or Samplicity.");
+                                    "Concert7 is not affiliated with Bricasti.");
                             }
                         });
 }
@@ -651,9 +750,11 @@ void MainPanel::showTab (int index)
 void MainPanel::changeListenerCallback (ChangeBroadcaster*)
 {
     StringArray now;
-    processor.getShared().withLibrary ([&now] (const IRLibrary& lib) { now = lib.getCategories(); });
-    if (now != categories && ! now.isEmpty())
+    const auto library = processor.getLibrary();
+    processor.getShared().withLibrary ([&now, library] (const IRLibrary& lib) { now = lib.getCategories (library); });
+    if ((now != categories && ! now.isEmpty()) || library != shownLibrary)
         rebuildCategoryButtons();
+    updateLibraryButtons();
 }
 
 void MainPanel::timerCallback()
@@ -690,11 +791,21 @@ void MainPanel::timerCallback()
     }
 
     const auto id = processor.getPresetId();
-    if (id != lastPresetId)
+    if (id != lastPresetId || status.category != lastFamily)
     {
         lastPresetId = id;
+        lastFamily = status.category;
+        // the category's button (one listed under MORE lights that)
+        const int index = categories.indexOf (status.category);
+        const int lit = index < 0 ? -1 : std::min (index, (int) categoryButtons.size() - 1);
         for (size_t i = 0; i < categoryButtons.size(); ++i)
-            categoryButtons[i]->setToggleState (id.startsWith (categories[(int) i] + "/"), dontSendNotification);
+            categoryButtons[i]->setToggleState ((int) i == lit, dontSendNotification);
+    }
+    if (processor.getLibrary() != shownLibrary)
+    {
+        rebuildCategoryButtons();
+        updateLibraryButtons();
+        lastPresetId.clear();
     }
 
     // double-click on DECAY returns to the native decay of the current preset (all other knobs: their default,
@@ -840,6 +951,15 @@ void MainPanel::paint (Graphics& g)
     g.setFont (labelFont (9.0f));
     g.drawText (ok ? "READY" : "NO IRS", 168, 91, 80, 12, Justification::left);
 
+    // the categories in a recessed tray, the library tabs on top of it (the chosen one opens into it)
+    const auto tray = categoryTray.toFloat();
+    g.setColour (Colours::tray);
+    g.fillRoundedRectangle (tray, 5.0f);
+    g.setColour (Colours::trayEdge);
+    g.drawRoundedRectangle (tray.reduced (0.5f), 5.0f, 1.0f);
+    g.setColour (juce::Colours::white.withAlpha (0.05f));
+    g.drawHorizontalLine (categoryTray.getBottom(), tray.getX() + 5.0f, tray.getRight() - 5.0f);
+
     // main section
     drawGroup (g, mainArea.toFloat(), {});
     g.setColour (Colours::outline);
@@ -936,14 +1056,22 @@ void MainPanel::resized()
     browser.setBounds (0, kFaceHeight, kWidth, kHeight - kFaceHeight);
     // faceplate
     display.setBounds (270, 20, 470, 132);
-    const int n = (int) categoryButtons.size();
-    const int cols = std::max (3, (n + 1) / 2);
-    const int gridX = 756, gridW = 228, bw = (gridW - (cols - 1) * 6) / cols, bh = 30;
-    for (int i = 0; i < n; ++i)
-        categoryButtons[(size_t) i]->setBounds (gridX + (i % cols) * (bw + 6), 22 + (i / cols) * (bh + 6), bw, bh);
-    prevButton.setBounds (gridX, 112, 44, 34);
-    browseButton.setBounds (gridX + 50, 112, gridW - 100, 34);
-    nextButton.setBounds (gridX + gridW - 44, 112, 44, 34);
+    // right of the display: the library tabs on a tray with its categories (always the same 3 x 3 places, so nothing
+    // moves when the library changes), below it < BROWSE >
+    const int gridX = 756, gridW = 228;
+    categoryTray = { gridX, 41, gridW, 78 };
+    const int tw = 64;
+    samButton.setBounds (gridX + 6, 20, tw, 22);
+    lsButton.setBounds (gridX + 6 + tw + 2, 20, tw, 22);
+    otherButton.setBounds (gridX + 6 + 2 * (tw + 2), 20, tw, 22);
+    const int pad = 6, gap = 4, cols = 3, rows = 3;
+    const int bw = (gridW - 2 * pad - (cols - 1) * 5) / cols;
+    const int bh = (categoryTray.getHeight() - 2 * 5 - (rows - 1) * gap) / rows;
+    for (int i = 0; i < (int) categoryButtons.size(); ++i)
+        categoryButtons[(size_t) i]->setBounds (gridX + pad + (i % cols) * (bw + 5), categoryTray.getY() + 5 + (i / cols) * (bh + gap), bw, bh);
+    prevButton.setBounds (gridX, 124, 44, 26);
+    browseButton.setBounds (gridX + 50, 124, gridW - 100, 26);
+    nextButton.setBounds (gridX + gridW - 44, 124, 44, 26);
     // undo / redo and A/B below the logo
     undoButton.setBounds (40, 120, 44, 26);
     redoButton.setBounds (88, 120, 44, 26);

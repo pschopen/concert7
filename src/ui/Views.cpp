@@ -80,6 +80,9 @@ void PresetDisplay::paint (Graphics& g)
             line3 = readCaption.toUpperCase() + "  " + readValue.toUpperCase();
         if (status.fileRate > 0)
             info = String (status.fileRate / 1000) + "K " + (status.trueStereo ? "TS" : "ST");
+        // the Bricasti library the response comes from
+        if (status.origin != IROrigin::User && status.fileRate > 0)
+            info = (status.origin == IROrigin::Split ? "LS " : "SAM ") + info;
         // CPU modes: low CPU (latency), convolution at half the rate
         if (status.lowCpu || status.halfRate)
             info = String (status.lowCpu ? "ECO " : "") + (status.halfRate ? "1/2 " : "") + info;
@@ -708,14 +711,17 @@ namespace
     }
 }
 
+namespace
+{
+    // the download links of the two libraries the setup names as tested examples
+    constexpr const char* kSamLink = "https://samplicity.com/downloads/";
+    constexpr const char* kLsLink = "https://downloads.liquidsonics.com/fusion-ir/sources/LiquidSonics_Bricasti_M7_Fusion-IR_Sources.7z";
+}
+
 WelcomeOverlay::WelcomeOverlay (Concert7Processor& p) : processor (p)
 {
-    pageButton.setButtonText (tr ("Open download page", u8"Download-Seite öffnen"));
-    zipButton.setButtonText (tr ("Choose ZIP file...", u8"ZIP-Datei auswählen …"));
     folderButton.setButtonText (tr ("Already unpacked? Choose folder...", u8"Schon entpackt? Ordner wählen …"));
-    pageButton.setTooltip ("Opens Samplicity's downloads page; the Bricasti M7 archive is listed at the bottom.");
-    zipButton.setTooltip ("Pick the downloaded ZIP (about 1 GB). Concert7 checks it and installs the impulse responses.");
-    folderButton.setTooltip ("Use a folder with unpacked impulse responses, your own included.");
+    folderButton.setTooltip ("Use a folder with unpacked impulse responses.");
     closeButton.setTooltip ("Closes the setup. It stays available under SETUP.");
 
     for (auto* b : { &pageButton, &zipButton, &folderButton, &closeButton })
@@ -729,11 +735,30 @@ WelcomeOverlay::WelcomeOverlay (Concert7Processor& p) : processor (p)
     addChildComponent (progressBar);
     progressBar.setPercentageDisplay (false);
 
+    // SAM / LS: the download link; OTHER: a folder of impulse responses
     pageButton.onClick = [this] {
-        URL (IRLibrary::kDownloadPage).launchInDefaultBrowser();
-        pageOpened = true;
+        if (library == IROrigin::User)
+        {
+            chooseFolder();
+            return;
+        }
+        URL (library == IROrigin::Split ? kLsLink : kSamLink).launchInDefaultBrowser();
+        (library == IROrigin::Split ? lsPageOpened : pageOpened) = true;
         repaint();
     };
+    samTab.setTooltip ("M7 library with one response per preset");
+    lsTab.setTooltip ("M7 library with the early reflections and the late reverb recorded on their own");
+    otherTab.setTooltip ("Any other impulse responses: another library or your own");
+    for (auto* b : { &samTab, &lsTab, &otherTab })
+    {
+        b->getProperties().set ("led", true);
+        b->getProperties().set ("fontHeight", 11.0f);
+        addAndMakeVisible (b);
+    }
+    samTab.onClick = [this] { showLibrary (IROrigin::Combined); };
+    lsTab.onClick = [this] { showLibrary (IROrigin::Split); };
+    otherTab.onClick = [this] { showLibrary (IROrigin::User); };
+    library = processor.getLibrary();
     zipButton.onClick = [this] { chooseZip(); };
     folderButton.onClick = [this] { chooseFolder(); };
     closeButton.onClick = [this] {
@@ -747,11 +772,19 @@ WelcomeOverlay::WelcomeOverlay (Concert7Processor& p) : processor (p)
 
 WelcomeOverlay::~WelcomeOverlay() { stopTimer(); }
 
+void WelcomeOverlay::showLibrary (IROrigin origin)
+{
+    library = origin;
+    localError.clear();
+    lastHash = -1;
+    refresh();
+}
+
 void WelcomeOverlay::chooseZip()
 {
-    chooser = std::make_unique<FileChooser> (tr ("Choose the Samplicity Bricasti ZIP archive", u8"Samplicity-Bricasti-ZIP-Archiv auswählen"),
+    chooser = std::make_unique<FileChooser> (tr ("Choose the archive (ZIP or 7z)", u8"Archiv auswählen (ZIP oder 7z)"),
                                              File::getSpecialLocation (File::userHomeDirectory).getChildFile ("Downloads"),
-                                             "*.zip");
+                                             "*.zip;*.7z");
     chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles,
                           [safe = SafePointer<WelcomeOverlay> (this)] (const FileChooser& fc) {
                               if (safe != nullptr && fc.getResult().existsAsFile())
@@ -761,11 +794,13 @@ void WelcomeOverlay::chooseZip()
 
 void WelcomeOverlay::chooseFolder()
 {
-    chooser = std::make_unique<FileChooser> (tr ("Choose the folder with the extracted impulse responses",
-                                                 u8"Ordner mit den entpackten Impulsantworten wählen"),
-                                             processor.getShared().getIRFolder().exists()
-                                                 ? processor.getShared().getIRFolder()
-                                                 : File::getSpecialLocation (File::userHomeDirectory).getChildFile ("Downloads"));
+    auto& shared = processor.getShared();
+    const auto current = library == IROrigin::User ? shared.getOwnFolder()
+                       : library == IROrigin::Split ? shared.getSplitFolder() : shared.getIRFolder();
+    chooser = std::make_unique<FileChooser> (tr ("Choose the folder with the impulse responses",
+                                                 u8"Ordner mit den Impulsantworten wählen"),
+                                             current.exists() ? current
+                                                              : File::getSpecialLocation (File::userHomeDirectory).getChildFile ("Downloads"));
     chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories,
                           [safe = SafePointer<WelcomeOverlay> (this)] (const FileChooser& fc) {
                               if (safe != nullptr && fc.getResult().isDirectory())
@@ -777,7 +812,7 @@ bool WelcomeOverlay::isInterestedInFileDrag (const StringArray& files)
 {
     if (processor.getShared().getInstaller().isBusy()) return false;
     for (auto& f : files)
-        if (f.endsWithIgnoreCase (".zip") || File (f).isDirectory())
+        if (f.endsWithIgnoreCase (".zip") || f.endsWithIgnoreCase (".7z") || File (f).isDirectory())
             return true;
     return false;
 }
@@ -786,7 +821,7 @@ void WelcomeOverlay::filesDropped (const StringArray& files, int, int)
 {
     setDragHighlight (false);
     for (auto& f : files)
-        if (f.endsWithIgnoreCase (".zip") || File (f).isDirectory())
+        if (f.endsWithIgnoreCase (".zip") || f.endsWithIgnoreCase (".7z") || File (f).isDirectory())
         {
             acceptFile (File (f));
             return;
@@ -799,13 +834,23 @@ void WelcomeOverlay::acceptFile (const File& f)
     localError.clear();
     if (f.isDirectory())
     {
-        shared.setIRFolder (f);
-        if (! shared.hasLibrary())
+        // OTHER takes any folder; otherwise what it holds decides where it goes
+        shared.useFolder (f, library == IROrigin::User);
+        for (auto origin : { IROrigin::Split, IROrigin::Combined, IROrigin::User })
+            if ((origin == IROrigin::Split ? shared.getSplitFolder() : origin == IROrigin::User ? shared.getOwnFolder()
+                                                                                                 : shared.getIRFolder()) == f
+                && shared.hasLibrary (origin))
+            {
+                library = origin;
+                break;
+            }
+        if (! shared.hasLibrary (library))
             localError = tr ("No impulse responses found in this folder.", "In diesem Ordner wurden keine Impulsantworten gefunden.");
     }
-    else if (f.hasFileExtension ("zip"))
+    else if (f.hasFileExtension ("zip") || f.hasFileExtension ("7z"))
     {
-        shared.getInstaller().start (f, SharedState::getDefaultInstallFolder());
+        shared.getInstaller().start (f, SharedState::getDefaultInstallFolder(), SharedState::getDefaultSplitInstallFolder(),
+                                     SharedState::getDefaultOwnInstallFolder(), library == IROrigin::User);
     }
     refresh();
     repaint();
@@ -819,7 +864,7 @@ WelcomeOverlay::ZoneState WelcomeOverlay::zoneState() const
     const auto phase = shared.getInstaller().getPhase();
     if (phase == IRInstaller::Phase::Checking || phase == IRInstaller::Phase::Extracting) return ZoneState::Busy;
     if (localError.isNotEmpty() || phase == IRInstaller::Phase::Failed) return ZoneState::Failed;
-    if (shared.hasLibrary()) return ZoneState::Done;
+    if (shared.hasLibrary (library)) return ZoneState::Done;
     return ZoneState::Idle;
 }
 
@@ -827,14 +872,37 @@ void WelcomeOverlay::refresh()
 {
     auto& shared = processor.getShared();
     auto& installer = shared.getInstaller();
+    // an archive of another library was installed: show that one
+    if (installer.getPhase() == IRInstaller::Phase::Done && installer.getKind() != IRInstaller::Kind::Unknown)
+    {
+        const auto kind = installer.getKind();
+        const auto installed = kind == IRInstaller::Kind::Split ? IROrigin::Split
+                             : kind == IRInstaller::Kind::Other ? IROrigin::User : IROrigin::Combined;
+        if (installed != library && shared.hasLibrary (installed) && ! shared.hasLibrary (library))
+            library = installed;
+    }
     const auto state = zoneState();
     const bool busy = state == ZoneState::Busy;
+    const bool other = library == IROrigin::User;
+    samTab.setToggleState (library == IROrigin::Combined, dontSendNotification);
+    lsTab.setToggleState (library == IROrigin::Split, dontSendNotification);
+    otherTab.setToggleState (other, dontSendNotification);
+    for (auto* b : { &samTab, &lsTab, &otherTab })
+        b->setEnabled (! busy);
+    pageButton.setButtonText (other ? tr ("Choose folder...", u8"Ordner wählen …")
+                              : library == IROrigin::Split ? tr ("Download archive", "Archiv herunterladen")
+                                                           : tr ("Open download page", u8"Download-Seite öffnen"));
+    pageButton.setTooltip (other ? "A folder with impulse responses; its subfolders become the categories."
+                                 : "Opens the download in your browser.");
+    pageButton.setEnabled (! busy);
+    folderButton.setVisible (! other);
 
     progressValue = installer.getPhase() == IRInstaller::Phase::Extracting ? installer.getProgress() : -1.0;
     progressBar.setVisible (busy);
     zipButton.setVisible (! busy);
-    zipButton.setButtonText (state == ZoneState::Done ? tr ("Install another ZIP...", u8"Andere ZIP installieren …")
-                                                      : tr ("Choose ZIP file...", u8"ZIP-Datei auswählen …"));
+    zipButton.setButtonText (state == ZoneState::Done ? tr ("Install another archive...", u8"Anderes Archiv installieren …")
+                                                      : tr ("Choose archive...", u8"Archiv auswählen …"));
+    zipButton.setTooltip ("Pick the downloaded archive (ZIP or 7z). Concert7 checks it and installs the impulse responses.");
     zipButton.setEnabled (! busy);
     folderButton.setEnabled (! busy);
     closeButton.setEnabled (! busy);
@@ -842,7 +910,8 @@ void WelcomeOverlay::refresh()
     closeButton.getProperties().set ("primary", shared.hasLibrary());
 
     const int hash = (int) state * 1000 + (int) installer.getPhase() * 100 + roundToInt (installer.getProgress() * 99.0f)
-                   + shared.getNumPresets() * 7 + (pageOpened ? 50000 : 0);
+                   + shared.getNumPresets() * 7 + (pageOpened ? 50000 : 0) + (lsPageOpened ? 100000 : 0)
+                   + (int) library * 200000;
     if (hash != lastHash)
     {
         lastHash = hash;
@@ -865,9 +934,12 @@ Rectangle<int> WelcomeOverlay::dropZone() const
 void WelcomeOverlay::resized()
 {
     const auto card = cardBounds();
+    otherTab.setBounds (card.getRight() - 32 - 84, card.getY() + 22, 84, 28);
+    lsTab.setBounds (otherTab.getX() - 6 - 64, card.getY() + 22, 64, 28);
+    samTab.setBounds (lsTab.getX() - 6 - 72, card.getY() + 22, 72, 28);
     pageButton.setBounds (card.getRight() - 32 - 190, card.getY() + 132, 190, 34);
     const auto zone = dropZone();
-    zipButton.setBounds (zone.withSizeKeepingCentre (200, 30).withY (zone.getBottom() - 44));
+    zipButton.setBounds (zone.withSizeKeepingCentre (220, 30).withY (zone.getBottom() - 44));
     progressBar.setBounds (zone.reduced (40, 0).withHeight (10).withY (zone.getBottom() - 36));
     closeButton.setBounds (card.getRight() - 32 - 160, card.getBottom() - 56, 160, 36);
     folderButton.setBounds (card.getX() + 24, card.getBottom() - 56, 300, 36);
@@ -921,7 +993,8 @@ void WelcomeOverlay::paintDropZone (Graphics& g, Rectangle<float> zone)
 
     auto inner = zone.reduced (16.0f, 12.0f);
     auto iconArea = inner.removeFromTop (34.0f).withSizeKeepingCentre (34.0f, 34.0f);
-    auto& installer = processor.getShared().getInstaller();
+    auto& shared = processor.getShared();
+    auto& installer = shared.getInstaller();
 
     String line1, line2;
     Colour line1Colour = Colours::text;
@@ -941,14 +1014,18 @@ void WelcomeOverlay::paintDropZone (Graphics& g, Rectangle<float> zone)
     }
     else if (state == ZoneState::Done)
     {
-        int numPresets = 0; // Bricasti and user impulse responses
-        processor.getShared().withLibrary ([&numPresets] (const IRLibrary& lib) { numPresets = (int) lib.getPresets().size(); });
+        int numPresets = 0; // of the library shown
+        const auto shownOrigin = library;
+        shared.withLibrary ([&numPresets, shownOrigin] (const IRLibrary& lib) { numPresets = lib.count (shownOrigin); });
         g.setColour (Colours::accent);
         g.fillEllipse (iconArea.reduced (2.0f));
         g.setColour (Colours::lcdBack);
         drawCheck (g, iconArea.reduced (8.0f));
-        line1 = tr ("Installed", "Installiert") + ": " + String (numPresets) + " " + tr ("presets", "Presets");
-        line2 = shortPath (processor.getShared().getIRFolder());
+        line1 = tr ("Installed", "Installiert") + ": " + String (numPresets) + " "
+              + (library == IROrigin::User ? tr ("impulse responses", "Impulsantworten") : tr ("presets", "Presets"));
+        const auto folder = library == IROrigin::Split ? shared.getSplitFolder()
+                          : library == IROrigin::User ? shared.getOwnFolder() : shared.getIRFolder();
+        line2 = shortPath (folder != File() ? folder : shared.getIRFolder());
     }
     else
     {
@@ -972,19 +1049,24 @@ void WelcomeOverlay::paintDropZone (Graphics& g, Rectangle<float> zone)
             line1Colour = Colours::warning;
             const auto err = installer.getError();
             line1 = localError.isNotEmpty() ? localError
-                  : err == IRInstaller::Error::NotBricasti ? tr ("This ZIP is not the Samplicity Bricasti library.",
-                                                                 u8"Diese ZIP ist nicht die Samplicity-Bricasti-Bibliothek.")
-                  : err == IRInstaller::Error::CannotOpen ? tr ("The ZIP file could not be opened (incomplete download?).",
-                                                                u8"Die ZIP-Datei lässt sich nicht öffnen (Download unvollständig?).")
+                  : err == IRInstaller::Error::NotALibrary
+                      ? (library == IROrigin::User ? tr ("This archive holds no audio files.", u8"Dieses Archiv enthält keine Audiodateien.")
+                                                   : tr ("This archive holds no M7 library (other impulse responses: OTHER).",
+                                                         u8"Dieses Archiv enthält keine M7-Bibliothek (andere Impulsantworten: OTHER)."))
+                  : err == IRInstaller::Error::NoUnpacker ? tr ("This system cannot unpack 7z: unpack it (7-Zip, Keka) and choose the folder.",
+                                                                u8"7z lässt sich hier nicht entpacken: selbst entpacken (7-Zip, Keka) und Ordner wählen.")
+                  : err == IRInstaller::Error::CannotOpen ? tr ("The archive could not be opened (incomplete download?).",
+                                                                u8"Das Archiv lässt sich nicht öffnen (Download unvollständig?).")
                   : err == IRInstaller::Error::Cancelled ? tr ("Installation cancelled.", "Installation abgebrochen.")
                   : tr ("Unpacking failed: ", "Entpacken fehlgeschlagen: ") + installer.getErrorDetail();
-            line2 = tr ("Drop the ZIP again or choose it below.", u8"ZIP erneut hier ablegen oder unten auswählen.");
+            line2 = tr ("Drop the archive again or choose it below.", u8"Archiv erneut hier ablegen oder unten auswählen.");
         }
         else
         {
             line1 = highlight ? tr ("Release to install", "Loslassen zum Installieren")
-                              : tr (u8"Drag the ZIP file here (“Samplicity - Bricasti IRs version 2023-10.zip”)",
-                                    u8"ZIP-Datei hierher ziehen („Samplicity - Bricasti IRs version 2023-10.zip“)");
+                  : library == IROrigin::User ? tr ("Drag an archive or a folder of impulse responses here",
+                                                    u8"Archiv oder Ordner mit Impulsantworten hierher ziehen")
+                                              : tr ("Drag the downloaded archive here", u8"Heruntergeladenes Archiv hierher ziehen");
             line2 = highlight ? String() : tr ("or", "oder");
         }
     }
@@ -1014,35 +1096,56 @@ void WelcomeOverlay::paint (Graphics& g)
 
     g.setColour (Colours::text);
     g.setFont (uiFont (14.0f));
-    g.drawFittedText (tr ("Concert7 needs the free Bricasti M7 impulse response library by Samplicity. It is not included "
-                          "with the plugin – install it in three steps:",
-                          u8"Concert7 benötigt die kostenlose Bricasti-M7-Impulsantwort-Bibliothek von Samplicity. Sie ist "
-                          u8"nicht im Plugin enthalten – so installierst du sie in drei Schritten:"),
+    g.drawFittedText (tr ("Concert7 includes no impulse responses. It is tested with two free Bricasti M7 libraries (SAM, "
+                          "LS) and plays others too (OTHER). Choose one and install it:",
+                          u8"Concert7 enthält keine Impulsantworten. Getestet ist es mit zwei kostenlosen Bricasti-M7-"
+                          u8"Bibliotheken (SAM, LS), andere spielt es auch (OTHER). Wähle eine und installiere sie:"),
                       r.removeFromTop (42.0f).toNearestInt(), Justification::topLeft, 2, 1.0f);
     r.removeFromTop (12.0f);
 
-    const bool installed = processor.getShared().hasLibrary();
+    const bool installed = processor.getShared().hasLibrary (library);
     auto step1 = r.removeFromTop (94.0f).withTrimmedRight (210.0f);
-    paintStep (g, step1, 1, installed || pageOpened,
-               tr ("Open Samplicity's download page", u8"Download-Seite von Samplicity öffnen"),
-               tr ("Samplicity provides the library for free. If you use it, you can support them by buying "
-                   "one of their reverb plugins.",
-                   u8"Samplicity stellt die Bibliothek kostenlos bereit. Wenn du sie nutzt, kannst du Samplicity "
-                   u8"mit dem Kauf eines ihrer Reverb-Plugins unterstützen."));
-    g.setColour (Colours::accent.withAlpha (0.8f));
-    g.setFont (uiFont (12.0f));
-    g.drawText ("samplicity.com/downloads", step1.withTrimmedLeft (44.0f).withTrimmedBottom (14.0f).removeFromBottom (16.0f),
-                Justification::centredLeft);
+    if (library == IROrigin::User)
+    {
+        paintStep (g, step1, 1, installed, tr ("Choose a folder with impulse responses", u8"Ordner mit Impulsantworten wählen"),
+                   tr ("Another library or your own: WAV, AIFF, FLAC, mono to 4 channels (true stereo). Subfolders "
+                       "become categories.",
+                       u8"Eine andere Bibliothek oder eigene: WAV, AIFF, FLAC, mono bis 4 Kanäle (True Stereo). "
+                       u8"Unterordner werden Kategorien."));
+        auto step2 = r.removeFromTop (58.0f);
+        paintStep (g, step2, 2, installed, tr ("Or drop an archive (ZIP or 7z)", u8"Oder ein Archiv ablegen (ZIP oder 7z)"),
+                   tr ("Concert7 unpacks its audio files into a folder of its own.",
+                       u8"Concert7 entpackt seine Audiodateien in einen eigenen Ordner."));
+    }
+    else
+    {
+        // the two tested libraries: their links, and that their makers are independent of Concert7
+        const bool ls = library == IROrigin::Split;
+        paintStep (g, step1, 1, installed || (ls ? lsPageOpened : pageOpened),
+                   ls ? tr ("Download the archive from LiquidSonics", "Archiv von LiquidSonics herunterladen")
+                      : tr ("Open Samplicity's download page", u8"Download-Seite von Samplicity öffnen"),
+                   ls ? tr ("Tested with Concert7. LiquidSonics is an independent company; there is no partnership.",
+                            u8"Mit Concert7 getestet. LiquidSonics ist ein eigenständiges Unternehmen; es besteht keine "
+                            u8"Partnerschaft.")
+                      : tr ("Tested with Concert7. Samplicity is an independent company; there is no partnership.",
+                            u8"Mit Concert7 getestet. Samplicity ist ein eigenständiges Unternehmen; es besteht keine "
+                            u8"Partnerschaft."));
+        g.setColour (Colours::accent.withAlpha (0.8f));
+        g.setFont (uiFont (12.0f));
+        g.drawText (ls ? "downloads.liquidsonics.com" : "samplicity.com/downloads",
+                    step1.withTrimmedLeft (44.0f).withTrimmedBottom (14.0f).removeFromBottom (16.0f), Justification::centredLeft);
 
-    auto step2 = r.removeFromTop (58.0f);
-    paintStep (g, step2, 2, installed,
-               tr ("Download the ZIP archive at the bottom of the page (about 1 GB)",
-                   u8"ZIP-Archiv ganz unten auf der Seite herunterladen (ca. 1 GB)"),
-               tr (u8"Listed as “Bricasti M7 impulse response archive”. No need to unpack it – Concert7 does that for you.",
-                   u8"Eintrag „Bricasti M7 impulse response archive“. Entpacken ist nicht nötig – das übernimmt Concert7."));
+        auto step2 = r.removeFromTop (58.0f);
+        paintStep (g, step2, 2, installed,
+                   ls ? tr ("Wait for the download (7z, about 2.4 GB)", u8"Download abwarten (7z, ca. 2,4 GB)")
+                      : tr ("Download the ZIP archive at the bottom of the page (about 1 GB)",
+                            u8"ZIP-Archiv ganz unten auf der Seite herunterladen (ca. 1 GB)"),
+                   tr (u8"No need to unpack it – Concert7 does that for you.",
+                       u8"Entpacken ist nicht nötig – das übernimmt Concert7."));
 
-    auto step3 = r.removeFromTop (30.0f);
-    paintStep (g, step3, 3, installed, tr ("Drop the ZIP file into Concert7", u8"ZIP-Datei in Concert7 ablegen"), {});
+        auto step3 = r.removeFromTop (30.0f);
+        paintStep (g, step3, 3, installed, tr ("Drop the archive into Concert7", u8"Archiv in Concert7 ablegen"), {});
+    }
 
     paintDropZone (g, dropZone().toFloat());
 

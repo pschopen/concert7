@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Three libraries: SAM / LS / OTHER above the categories. SAM and LS are two M7 libraries Concert7 is tested
+  with (the setup links to them): one with a response per preset, one with the early reflections and the late
+  reverb recorded on their own (also the M7's second banks Halls 2, Plates 2, Rooms 2, Spaces 2, and Nonlin).
+  OTHER plays any other impulse responses, another library or your own, with its subfolders as categories.
+  Switching goes to the same preset where both M7 libraries have it, with the preset's own settings except for
+  the kept groups; the library comes with the preset in the project. The setup installs either archive (a `.7z`
+  with the system's `tar`) or any archive or folder of impulse responses for OTHER. A preset recorded as two
+  blocks is their sum at the files' levels; nothing is cut at a crossover: Decay changes only the late reverb, the
+  reflections stay, and EARLY, LATE, the early patterns and the pre-delay work on the real blocks. Where the takes
+  differ, the Drift modulation uses the second take instead of a synthesised variant. The display shows SAM or LS
 - Decay mode (right-click DECAY): how Decay changes the reverb – Sabine (natural, as before), Proportional
   (brilliant: every frequency by the same factor, like the M7's own multipliers), Sabine with constant level (the
   loudness of the preset at every decay), Stretch (the response resampled by up to ×1.3, a larger or smaller room)
@@ -58,9 +68,9 @@
 - A preset just loaded is the recording itself, sample for sample, and the display shows both curves on top of
   each other: nothing changes before you change something (tested on every preset and through the plugin)
 - Decay changes the bass at most by its own factor: below the mids the reverb time no longer grows (or shrinks)
-  a little more than Decay, so the long deep bass of the Samplicity recordings grows with Decay, not faster
+  a little more than Decay, so a long deep bass in a recording grows with Decay, not faster
 - Decay changes the level as on the M7: the early reflections keep theirs, the late reverb starts a little lower
-  the longer it rings (0.55 dB per dB of reverb time, as in the LiquidSonics captures of the M7). A longer decay
+  the longer it rings (0.55 dB per dB of reverb time, as in captures of the M7 with both blocks at fixed levels). A longer decay
   is therefore louder, but less than its longer tail alone would make it: twice the decay about 2 - 3 dB, three
   times 3 - 4 dB, half of it 2 - 4 dB softer (before, the whole response kept its energy and the early
   reflections moved by up to 4 dB)

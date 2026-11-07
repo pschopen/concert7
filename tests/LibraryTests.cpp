@@ -1,7 +1,7 @@
 // Concert7 - open source true stereo convolution reverb
 // Copyright (C) 2026 pschopen, GPL-3.0-or-later
 //
-// Tests against the real Samplicity Bricasti library (skipped without --irs / CONCERT7_IR_DIR).
+// Tests against a real library of combined M7 captures (skipped without --irs / CONCERT7_IR_DIR).
 
 #include "TestHelpers.h"
 #include "dsp/IRLibrary.h"
@@ -19,7 +19,7 @@ public:
 
     void runTest() override
     {
-        beginTest ("Samplicity naming scheme");
+        beginTest ("bank naming scheme");
         auto p = IRLibrary::parseFileName ("1 Halls 01 Large Hall, 48K L");
         expect (p.ok);
         expectEquals (p.categoryOrder, 1);
@@ -74,7 +74,7 @@ public:
         const auto& presets = lib.getPresets();
         logMessage ("  " + String ((int) presets.size()) + " presets, " + String (lib.numBricastiPresets()) + " Bricasti");
         expectEquals (lib.numBricastiPresets(), 134);
-        expectEquals (lib.getCategories().joinIntoString (","), String ("Halls,Plates,Rooms,Chambers,Ambiences,Spaces"));
+        expectEquals (lib.getCategories (IROrigin::Combined).joinIntoString (","), String ("Halls,Plates,Rooms,Chambers,Ambiences,Spaces"));
         expectEquals ((int) lib.getErPatternPresets().size(), 32);
         std::set<int> unique (lib.getErPatternPresets().begin(), lib.getErPatternPresets().end());
         expectEquals ((int) unique.size(), 32, "distinct early reflection patterns");
@@ -96,8 +96,8 @@ public:
                 if (v.quad != File() && v.left != File() && v.right != File())
                 {
                     IRPreset quadOnly = *hall, pairOnly = *hall;
-                    quadOnly.variants = { { 48000, IRVariant { v.quad, {}, {}, {} } } };
-                    pairOnly.variants = { { 48000, IRVariant { {}, v.left, v.right, {} } } };
+                    quadOnly.variants = { { 48000, IRVariant { v.quad, {}, {}, {}, {}, {} } } };
+                    pairOnly.variants = { { 48000, IRVariant { {}, v.left, v.right, {}, {}, {} } } };
                     String err;
                     auto a = loadSourceIR (quadOnly, 48000.0, err);
                     auto b = loadSourceIR (pairOnly, 48000.0, err);

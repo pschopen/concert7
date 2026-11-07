@@ -2,13 +2,14 @@
 # Concert7 test runner: builds everything, runs the unit tests (with the Bricasti library if given),
 # renders GUI snapshots and validates the Audio Unit.
 #
-#   tools/run_tests.sh [IR_FOLDER]
+#   tools/run_tests.sh [IR_FOLDER] [SPLIT_CAPTURES_FOLDER]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build"
 OUT="$BUILD/test-output"
 IRS="${1:-${CONCERT7_IR_DIR:-}}"
+SPLITDIR="${2:-${CONCERT7_SPLIT_DIR:-}}"
 
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build "$BUILD" -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
@@ -17,6 +18,7 @@ DEV="$BUILD/Concert7Dev_artefacts/Release/Concert7Dev"
 mkdir -p "$OUT"
 IRARGS=()
 if [ -n "$IRS" ]; then IRARGS=(--irs "$IRS"); else echo "note: no IR folder given, library/processor tests are skipped"; fi
+if [ -n "$SPLITDIR" ]; then IRARGS+=(--split "$SPLITDIR"); else echo "note: no folder of split captures given, their library tests are skipped"; fi
 
 echo "== unit tests"
 STATUS=0

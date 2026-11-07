@@ -194,9 +194,13 @@ void PresetBrowser::refresh()
     users.rescan();
     all.clear();
     categories.clear();
+    // the presets of the library in use
+    const auto library = processor.getLibrary();
+    shownLibrary = library;
     processor.getShared().withLibrary ([&] (const IRLibrary& lib) {
         for (const auto& p : lib.getPresets())
         {
+            if (p.origin != library) continue;
             PresetEntry e;
             e.key = p.id;
             e.name = p.name;
@@ -205,7 +209,7 @@ void PresetBrowser::refresh()
             e.irId = p.id;
             all.push_back (std::move (e));
         }
-        categories = lib.getCategories();
+        categories = lib.getCategories (library);
     });
     for (auto& e : all)
     {
@@ -357,7 +361,7 @@ void PresetBrowser::choose (int row)
 
 void PresetBrowser::step (int delta)
 {
-    if (all.empty()) refresh();
+    if (all.empty() || shownLibrary != processor.getLibrary()) refresh();
     if (shown.empty()) return;
     const auto current = currentKey();
     int idx = -1;

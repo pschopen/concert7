@@ -362,7 +362,7 @@ public:
 
         beginTest ("a long deep bass stays as recorded, DECAY changes it at most by its own factor");
         {
-            // a 1.2 s reverb plus a softer 3 s tail below about 60 Hz that takes over later (like the Samplicity
+            // a 1.2 s reverb plus a softer 3 s tail below about 60 Hz that takes over later (like some
             // recordings); times x gives the same room with every decay x times as long
             auto longBassIR = [&] (float x) {
                 auto ch = syntheticIR (1.2f * x, 3.5f * x, sr, 61);
@@ -446,7 +446,7 @@ public:
                 auto ir = designIR (*src, nullptr, p);
                 const float start = startDb (*ir, p.decay) - native;
                 const float level = bandEnergyDb (ir->ch[0], sr, 500.0f, 2000.0f, 0) - nativeLevel;
-                // 0.55 dB lower per dB of reverb time (LiquidSonics captures): the energy grows with RT^0.45
+                // 0.55 dB lower per dB of reverb time (split captures): the energy grows with RT^0.45
                 const float expected = -0.55f * 10.0f * std::log10 (factor);
                 logMessage ("  x" + String (factor) + ": late start " + String (start, 1) + " dB (expected " + String (expected, 1)
                             + "), level " + String (level, 1) + " dB");

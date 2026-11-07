@@ -143,6 +143,27 @@ void Concert7LookAndFeel::drawButtonBackground (Graphics& g, Button& b, const Co
         return;
     }
 
+    if (b.getProperties()["folderTab"])
+    {
+        // a tab on the tray below it (drawn by the parent; the tab overlaps its edge): the chosen one has the tray's
+        // colour and is open at the bottom, so it reads as part of the tray
+        Path shape;
+        shape.addRoundedRectangle (r.getX(), r.getY(), r.getWidth(), r.getHeight() + 3.0f, corner, corner, true, true, false, false);
+        if (on)
+        {
+            g.setColour (Colours::tray);
+            g.fillPath (shape);
+            g.setColour (Colours::trayEdge);
+            g.strokePath (shape, PathStrokeType (1.0f));
+        }
+        else if (over)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.04f));
+            g.fillPath (shape);
+        }
+        return;
+    }
+
     if (b.getProperties()["link"])
     {
         if (over && b.isEnabled())

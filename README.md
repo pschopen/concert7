@@ -5,9 +5,10 @@
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 **Concert7** is an open source true stereo reverb (AU, VST3, LV2, standalone – macOS, Windows, Linux) built for
-the free **Bricasti M7 impulse responses recorded by Samplicity**: a hardware-style dot matrix display with banks of
-presets, a big decay control and pages for early/late balance, roll-offs, multi-band decay, delay, ducking and a
-post EQ. Concert7 is an independent project and is not affiliated with Bricasti or Samplicity.
+free libraries of **Bricasti M7 impulse responses** (and plays any others): a hardware-style dot matrix display with
+banks of presets, a big decay control and pages for early/late balance, roll-offs, multi-band decay, delay, ducking
+and a post EQ. Concert7 is an independent project and is not affiliated with Bricasti or with the makers of the
+libraries.
 
 **Website:** <https://concert7.github.io/> · **[Documentation of all controls](https://concert7.github.io/docs/)**
 
@@ -40,42 +41,53 @@ Get the installer for your system from the [releases page](https://github.com/ps
 
 ### Impulse responses (required)
 
-Concert7 does **not** ship any impulse responses. It is made for the free Bricasti M7 library by Samplicity
-(your own impulse responses work as well, see below).
-Samplicity provides it free of charge – if you use it, you can support them by buying one of their reverb plugins.
+Concert7 does **not** ship any impulse responses. Its setup screen (also under SETUP → "Install impulse
+responses…") links to two free Bricasti M7 libraries it is tested with – their makers are independent companies,
+there is no partnership with them – and takes any other impulse responses as well. SAM / LS / OTHER above the
+category buttons switches between the three:
 
-1. Open Samplicity's downloads page: <https://samplicity.com/downloads/> – the library is listed at the bottom
-   ("Bricasti M7 impulse response archive").
-2. Download the ZIP archive ("Samplicity - Bricasti IRs version 2023-10.zip", ≈ 1 GB) – no need to unpack it.
-3. Open Concert7 in your DAW and drag the ZIP onto the setup screen (or pick it with "Choose ZIP file…").
-   Concert7 checks that it is the Bricasti library and extracts the quad channel files (both sample rates,
-   ≈ 520 MB) into its library folder. You can delete the ZIP afterwards.
+| | Library | Installed into |
+| --- | --- | --- |
+| **SAM** | an M7 library with one response per preset (134 presets, ZIP ≈ 1 GB; Concert7 extracts the quad channel files, ≈ 520 MB) | `Impulse Responses` |
+| **LS** | an M7 library with the early reflections and the late reverb recorded on their own, eight takes, 96 kHz (221 presets: the same and the M7's second banks Halls 2, Plates 2, Rooms 2, Spaces 2, and Nonlin; 7z ≈ 2.4 GB) | `Split Captures` |
+| **OTHER** | any other impulse responses: another library or your own; subfolders become the categories | the folder you choose, or `Other Impulse Responses` for an archive |
 
-| System | Library folder |
-| --- | --- |
-| macOS | `~/Library/Application Support/Concert7/Impulse Responses` |
-| Windows | `%APPDATA%\Concert7\Impulse Responses` |
-| Linux | `~/.config/Concert7/Impulse Responses` |
+The folders are in `~/Library/Application Support/Concert7` (macOS), `%APPDATA%\Concert7` (Windows) or
+`~/.config/Concert7` (Linux). Download an archive with the setup screen's link and drop it onto the screen (or pick
+it) – Concert7 checks what it holds and installs it, you can delete it afterwards. A 7z is unpacked with the
+system's `tar` (libarchive: macOS, Windows 10 and later; on Linux `bsdtar` is needed); without it, unpack it
+yourself and choose the folder ("Already unpacked? Choose folder…"). An unpacked M7 library in a folder named
+after the hardware in Downloads, Music or Documents is found by itself. Files at 44.1 and 48 kHz are used at their
+multiples, other rates are resampled once when a preset loads.
 
-Already unpacked the archive yourself? Choose that folder instead ("Already unpacked? Choose folder…"). The setup
-screen is always available via SETUP → "Install impulse responses (ZIP)…". Concert7 uses the 44.1 kHz files at
-44.1/88.2/176.4 kHz and the 48 kHz files at 48/96/192 kHz; other rates are resampled once when a preset loads.
+**Switching** goes to the same preset in the other M7 library (bank and number; Spaces 17 of the SAM library is
+Spaces 16 of the LS library, presets without a counterpart switch to the first preset of their category) and, like
+choosing a preset, starts with its own settings and decay except for the kept groups. The library comes with the
+preset in the project; new instances start with the one chosen last.
+
+**Two blocks:** a preset recorded as early reflections and late reverb is their sum at the files' levels. That
+balance is not always the M7 preset's mix: against the other library the late reverb is within ±3 dB for 61 % of
+the presets but 6 dB or more off for one in six, and no rule computed from the files comes closer, so it is left to
+EARLY and LATE. Since the blocks are recordings of their own, nothing is cut at a crossover: Decay changes only the
+late reverb and the reflections stay as they are (as on the M7); EARLY / LATE, the early patterns and the pre-delay
+work on the real blocks. Where the takes have a fine structure of their own (the second banks), the Drift
+modulation uses take 2 instead of a synthesised variant.
 
 **User presets** (BROWSE → SAVE AS...) store the whole sound – impulse response and every setting – as
 `.c7preset` files in the `Presets` folder next to the library folder (BROWSE → FOLDER). They can be copied between
 computers; one whose impulse response is missing loads with the first preset and says so.
 
-**Your own impulse responses:** every other WAV, AIFF or FLAC file in the IR folder (subfolders included) shows
-up in the *User* bank. Copy the files into the library folder and use SETUP → "Rescan library", or choose a
-folder of your own. A 4 channel file is used as true stereo (channel order LL, LR, RL, RR), a stereo file as
-L→L / R→R and a mono file on both sides; files at other sample rates are resampled. The ZIP installation only
-accepts the Samplicity archive, and the early patterns are always taken from the Bricasti presets.
+**Your own impulse responses (OTHER):** every WAV, AIFF or FLAC file in the chosen folder (and any other one in the
+library folders); its first subfolder is its category, files in the folder itself are *User*. Add files and use
+SETUP → "Rescan library". A 4 channel file is used as true stereo (channel order LL, LR, RL, RR), a stereo file as
+L→L / R→R and a mono file on both sides; files at other sample rates are resampled. The early patterns are taken
+from an M7 library (the one in use, for OTHER the SAM library if it is there).
 
 ## Features
 
 | Area | Concert7 |
 | --- | --- |
-| Presets | the 134 Samplicity M7 captures (Halls, Plates, Rooms, Chambers, Ambience, Spaces) + your own IRs (mono, stereo or 4 channel true stereo) in the IR folder |
+| Presets | an M7 library with 134 presets (Halls, Plates, Rooms, Chambers, Ambience, Spaces) or one with 221 (the same and the second banks, Nonlin; early reflections and late reverb recorded on their own), or any other impulse responses (mono, stereo or 4 channel true stereo) – SAM / LS / OTHER switches |
 | User presets | the whole sound (impulse response and every setting) in a `.c7preset` file; preset browser with search, favourites, categories and tags; tags for the library presets too |
 | Keep on preset change | eleven groups of settings (decay, pre-delay, levels, mix, roll-off, multi-band, delay, modulation, ducker, EQ, space) or all of them can be kept when another preset is chosen; padlocks on their knobs |
 | Undo / A/B | undo / redo of your edits (not of host automation), Cmd/Ctrl+Z; A/B with two complete settings, each with its own undo, both stored with the project |
@@ -87,7 +99,7 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Levels | Early, Late and VLF (late reverb below ~120 Hz) |
 | Roll-off | separate low pass for early reflections and late reverb, 80 Hz – 22 kHz |
 | Multi-band decay | low shelf 80 Hz – 4.8 kHz and high shelf 200 Hz – 16 kHz, ×0.2 – ×4 |
-| Early patterns | 32 patterns taken from the early part of other presets, ordered short → long |
+| Early patterns | 32 patterns taken from the early part of other presets of the library in use, ordered short → long |
 | Delay | 100 ms – 1 s or tempo synced, level –20…0 dB / off, 3 voices of the late reverb |
 | Ducker | amount, threshold, release, sidechain input (EXTRAS tab) |
 | Post EQ | high pass 12 dB, low shelf/bell, mid bell, high shelf/bell, high cut 12 dB, interactive curve |
@@ -120,8 +132,12 @@ Static impulse responses cannot simply be "made longer". Concert7 re-synthesises
 parameter changes (`src/dsp/IRDesigner.cpp`):
 
 1. **Analysis** (once per preset): onset detection, third-octave band envelopes from an STFT, noise-floor / fade-out
-   detection per band and a noise compensated Schroeder fit (Lundeby style) of the late reverb time.
-2. **Split** into early reflections and late reverb (raised cosine crossover ≈ 80 ms after the onset).
+   detection per band and a noise compensated Schroeder fit (Lundeby style) of the late reverb time. The
+   captures with the two blocks recorded on their own are analysed on their late reverb alone; their tails reach a noise floor and are faded out
+   after it, so the floor is looked for before the fade, and a band that never rises 20 dB above it takes its
+   neighbours' reverb time.
+2. **Split** into early reflections and late reverb (raised cosine crossover ≈ 80 ms after the onset). The
+   captures with two blocks need none: they are the early part and the late part.
 3. **Late reverb**: every STFT bin gets a time-varying gain that turns its own native decay slope (fitted per bin)
    into the target slope (Decay × low/high multipliers), so a frequency that rings longer stays relatively longer.
    A shorter decay fades the early reflections the same way. The gain is capped so the level never rises above the
@@ -131,7 +147,7 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    The recording is used only as long as it follows its decay line (in the bass of the Bricasti recordings often
    only half of it), and it crossfades into the continuation over 200 ms.
    The early reflections keep their level and the late reverb starts 0.55 dB lower per dB of reverb time
-   (LiquidSonics captures), so a longer decay is louder, its energy grows with RT^0.45.
+   (captures of the M7 with both blocks at fixed levels), so a longer decay is louder, its energy grows with RT^0.45.
    How Decay spreads over frequency is the **decay mode** (right-click DECAY). Nobody knows which the M7 itself does –
    there are no recordings of one program at several decays – so the user chooses:
    * *Sabine (natural)*, the default: only the wall part of the decay rate scales, air absorption (ISO 9613-1) stays,
@@ -146,7 +162,7 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
      per third octave scaled proportionally, the early reflections and the start of the late reverb as they are,
      the continuation from the last frames' level (each channel its own noise, a 43 ms crossfade).
    Below the mids no frequency changes its reverb time by more than Decay's own factor (Sabine would let the bass,
-   which has no air part, grow a little more), so the long deep bass of the Samplicity recordings grows with Decay,
+   which has no air part, grow a little more), so a long deep bass in a recording grows with Decay,
    not faster. A preset at its own decay is the recording itself, sample for sample: nothing changes before you
    change something.
    `tools/decay_families.py` checks the result against the Large / Medium / Small families of the library.
@@ -293,7 +309,6 @@ What the tests cover:
 
 Concert7 is free software under the GNU General Public License v3.0 or later (see `LICENSE`). The released
 binaries include JUCE, used under the AGPLv3, and are therefore distributed under the terms of the AGPLv3; see
-`THIRD_PARTY_NOTICES.md` for all components and their licenses. The Samplicity impulse responses are not part of
-this project. Bricasti and M7 are trademarks of their respective owner.
+`THIRD_PARTY_NOTICES.md` for all components and their licenses. Impulse responses are not part of this project. Bricasti and M7 are trademarks of their respective owner.
 
 Changes: see `CHANGELOG.md`.

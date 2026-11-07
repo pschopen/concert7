@@ -39,7 +39,10 @@ private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void rebuildCategoryButtons();
+    void updateLibraryButtons();
+    void chooseLibrary (IROrigin library);
     void showCategoryMenu (const juce::String& category, juce::Component* target);
+    void showMoreCategoriesMenu (juce::Component* target);
     void showSetupMenu();
     void touch (Knob& k);
     void editNextKnob (Knob& from, bool backwards);
@@ -55,6 +58,11 @@ private:
     juce::TextButton prevButton { "<" }, nextButton { ">" }, browseButton { "BROWSE" };
     std::vector<std::unique_ptr<juce::TextButton>> categoryButtons;
     juce::StringArray categories;
+    IROrigin shownLibrary = IROrigin::Combined;   // whose categories the buttons show
+    // the library: an M7 library of combined responses, one of split captures, any other impulse responses
+    juce::TextButton samButton { "SAM" }, lsButton { "LS" }, otherButton { "OTHER" };
+    juce::Rectangle<int> categoryTray;   // the box of the category buttons, the library tabs on its top edge
+    static constexpr int kMaxCategoryButtons = 9;   // more categories (OTHER): the last button lists the rest
 
     std::vector<std::unique_ptr<Knob>> knobs;
     StereoMeter inMeter { "IN" }, outMeter { "OUT" };
@@ -90,7 +98,7 @@ private:
 
     Knob* lastTouched = nullptr;
     std::shared_ptr<const BuiltIR> shownIR;
-    juce::String lastPresetId;
+    juce::String lastPresetId, lastFamily;
     float lastNativeRT = -1.0f;
     GroupMask shownKept = ~GroupMask (0);
     juce::Rectangle<int> mainArea, pageArea;

@@ -10,6 +10,9 @@ using namespace juce;
 namespace Keys
 {
     static const char* irFolder    = "irFolder";
+    static const char* splitFolder = "splitFolder";
+    static const char* ownFolder   = "ownFolder";
+    static const char* library     = "library";        // the library new instances start with
     static const char* welcomeDone = "welcomeDone";
     static const char* holdDecay   = "holdDecay";      // before the groups: only DECAY could be kept
     static const char* keepGroups  = "keepOnPresetChange";
@@ -25,15 +28,21 @@ IRInstaller::~IRInstaller()
     stopThread (10000);
 }
 
-void IRInstaller::start (const File& zipFile, const File& dest)
+void IRInstaller::start (const File& zipFile, const File& combinedDest, const File& splitDest, const File& ownDest,
+                         bool acceptOtherArchives)
 {
     if (isThreadRunning()) return;
     {
         const ScopedLock sl (lock);
         zip = zipFile;
-        destination = dest;
+        combinedDestination = combinedDest;
+        splitDestination = splitDest;
+        ownDestination = ownDest;
+        acceptOther = acceptOtherArchives;
+        destination = combinedDest;
         errorDetail.clear();
     }
+    kind = Kind::Unknown;
     progress = 0.0f;
     error = Error::None;
     phase = Phase::Checking;
@@ -59,11 +68,15 @@ File IRInstaller::getDestination() const
 
 void IRInstaller::run()
 {
-    File zipFile, dest;
+    File zipFile, combinedDest, splitDest, ownDest;
+    bool other = false;
     {
         const ScopedLock sl (lock);
         zipFile = zip;
-        dest = destination;
+        combinedDest = combinedDestination;
+        splitDest = splitDestination;
+        ownDest = ownDestination;
+        other = acceptOther;
     }
 
     auto finish = [this] (Error e, const String& detail) {
@@ -77,10 +90,23 @@ void IRInstaller::run()
         MessageManager::callAsync ([this, ok, flag = alive] { if (flag->load() && onFinished) onFinished (ok); });
     };
 
-    // only accept the Samplicity Bricasti archive (or another archive full of its files)
-    const int found = countBricastiEntries (zipFile);
-    if (found < 0) { finish (Error::CannotOpen, zipFile.getFileName()); return; }
-    if (found < 100) { finish (Error::NotBricasti, zipFile.getFileName()); return; }
+    // an M7 library (or another archive full of its files); any impulse responses only where asked for (OTHER)
+    StringArray names;
+    if (! listArchive (zipFile, names))
+    {
+        const bool sevenZip = zipFile.hasFileExtension ("7z");
+        finish (sevenZip && zipFile.existsAsFile() ? Error::NoUnpacker : Error::CannotOpen, zipFile.getFileName());
+        return;
+    }
+    kind = detect (names);
+    if (kind == Kind::Unknown || (kind == Kind::Other && ! other)) { finish (Error::NotALibrary, zipFile.getFileName()); return; }
+    const auto dest = kind == Kind::Split ? splitDest
+                    : kind == Kind::Other ? ownDest.getChildFile (File::createLegalFileName (zipFile.getFileNameWithoutExtension()))
+                    : combinedDest;
+    {
+        const ScopedLock sl (lock);
+        destination = dest;
+    }
 
     phase = Phase::Extracting;
     dest.createDirectory();
@@ -94,7 +120,33 @@ void IRInstaller::run()
     else finish (ok ? Error::None : Error::ExtractFailed, message);
 }
 
-int IRInstaller::countBricastiEntries (const File& zipFile)
+namespace
+{
+    String baseName (const String& path)
+    {
+        return path.replaceCharacter ('\\', '/').fromLastOccurrenceOf ("/", false, false).upToLastOccurrenceOf (".", false, false);
+    }
+
+    bool isAudio (const String& name)
+    {
+        return name.endsWithIgnoreCase (".wav") || name.endsWithIgnoreCase (".aif") || name.endsWithIgnoreCase (".aiff")
+            || name.endsWithIgnoreCase (".flac");
+    }
+
+    /** The system's tar where it reads 7z (libarchive: macOS, Windows 10 and later, bsdtar on Linux). */
+    StringArray tarCandidates()
+    {
+       #if JUCE_MAC
+        return { "/usr/bin/tar", "/usr/bin/bsdtar" };
+       #elif JUCE_WINDOWS
+        return { File::getSpecialLocation (File::windowsSystemDirectory).getChildFile ("tar.exe").getFullPathName(), "tar" };
+       #else
+        return { "bsdtar", "tar" };
+       #endif
+    }
+}
+
+int IRInstaller::countBankEntries (const File& zipFile)
 {
     if (! zipFile.existsAsFile()) return -1;
     ZipFile archive (zipFile);
@@ -102,16 +154,109 @@ int IRInstaller::countBricastiEntries (const File& zipFile)
     int count = 0;
     for (int i = 0; i < archive.getNumEntries(); ++i)
         if (auto* e = archive.getEntry (i))
-            if (IRLibrary::parseFileName (e->filename.replaceCharacter ('\\', '/')
-                                              .fromLastOccurrenceOf ("/", false, false)
-                                              .upToLastOccurrenceOf (".", false, false)).ok)
+            if (IRLibrary::parseFileName (baseName (e->filename)).ok)
                 ++count;
     return count;
+}
+
+bool IRInstaller::listArchive (const File& archive, StringArray& names)
+{
+    names.clear();
+    if (! archive.existsAsFile()) return false;
+    if (! archive.hasFileExtension ("7z"))
+    {
+        ZipFile z (archive);
+        for (int i = 0; i < z.getNumEntries(); ++i)
+            if (auto* e = z.getEntry (i))
+                names.add (e->filename.replaceCharacter ('\\', '/'));
+        if (! names.isEmpty() || ! archive.hasFileExtension ("zip"))
+            return ! names.isEmpty();
+    }
+    for (auto& tar : tarCandidates())
+    {
+        ChildProcess p;
+        if (! p.start (StringArray { tar, "-tf", archive.getFullPathName() }, ChildProcess::wantStdOut)) continue;
+        const auto out = p.readAllProcessOutput();
+        if (p.getExitCode() != 0) continue;
+        names = StringArray::fromLines (out);
+        names.removeEmptyStrings();
+        if (! names.isEmpty()) return true;
+    }
+    return false;
+}
+
+IRInstaller::Kind IRInstaller::detect (const StringArray& names)
+{
+    int combined = 0, split = 0, audio = 0;
+    for (auto& n : names)
+    {
+        if (IRLibrary::parseFileName (baseName (n)).ok) ++combined;
+        else if (IRLibrary::parseSplitPath (n).ok) ++split;
+        if (isAudio (n)) ++audio;
+    }
+    if (split >= 100 && split >= combined) return Kind::Split;
+    if (combined >= 100) return Kind::Combined;
+    return audio > 0 ? Kind::Other : Kind::Unknown;
 }
 
 bool IRInstaller::extractArchive (const File& zipFile, const File& dest,
                                   const std::function<bool (int, int)>& onProgress, String& errorMessage)
 {
+    StringArray names;
+    if (! listArchive (zipFile, names))
+    {
+        errorMessage = "The archive could not be opened.";
+        return false;
+    }
+    const bool split = detect (names) == Kind::Split;
+
+    if (zipFile.hasFileExtension ("7z"))
+    {
+        // the system's tar unpacks it (into dest, with the archive's own folder); its listing counts the progress
+        int total = 0;
+        for (auto& n : names)
+            if (isAudio (n)) ++total;
+        for (auto& tar : tarCandidates())
+        {
+            ChildProcess p;
+            if (! p.start (StringArray { tar, "-xvf", zipFile.getFullPathName(), "-C", dest.getFullPathName() },
+                           ChildProcess::wantStdOut | ChildProcess::wantStdErr))
+                continue;
+            int done = 0;
+            String pending;
+            char buffer[4096];
+            for (;;)
+            {
+                const int n = p.readProcessOutput (buffer, (int) sizeof (buffer));
+                if (n <= 0)
+                {
+                    if (! p.isRunning()) break;
+                    Thread::sleep (20);
+                    continue;
+                }
+                pending += String::fromUTF8 (buffer, n);
+                auto lines = StringArray::fromLines (pending);
+                pending = pending.endsWithChar ('\n') ? String() : lines[lines.size() - 1];
+                for (int i = 0; i < lines.size() - (pending.isEmpty() ? 0 : 1); ++i)
+                    if (isAudio (lines[i].trim())) ++done;
+                if (onProgress && ! onProgress (std::min (done, total), total))
+                {
+                    p.kill();
+                    return false;
+                }
+            }
+            if (p.getExitCode() == 0)
+            {
+                if (onProgress) onProgress (total, total);
+                return true;
+            }
+            errorMessage = "tar could not unpack the archive.";
+            return false;
+        }
+        errorMessage = "No program to unpack 7z archives was found.";
+        return false;
+    }
+
     ZipFile archive (zipFile);
     if (archive.getNumEntries() == 0)
     {
@@ -119,15 +264,16 @@ bool IRInstaller::extractArchive (const File& zipFile, const File& dest,
         return false;
     }
 
-    // the quad channel files contain everything (both sample rates, all 4 paths)
-    auto isAudio = [] (const String& name) {
-        return name.endsWithIgnoreCase (".wav") || name.endsWithIgnoreCase (".aif") || name.endsWithIgnoreCase (".aiff")
-            || name.endsWithIgnoreCase (".flac");
-    };
+    // a combined library: the quad channel files contain everything (both sample rates, all 4 paths).
+    // Split captures: all of them (both blocks of every take). Anything else: all audio files.
     std::vector<int> wanted;
     for (int i = 0; i < archive.getNumEntries(); ++i)
-        if (auto* e = archive.getEntry (i); e != nullptr && e->filename.containsIgnoreCase ("quad channel files") && isAudio (e->filename))
-            wanted.push_back (i);
+        if (auto* e = archive.getEntry (i); e != nullptr && isAudio (e->filename))
+        {
+            const auto name = e->filename.replaceCharacter ('\\', '/');
+            if (split ? IRLibrary::parseSplitPath (name).ok : name.containsIgnoreCase ("quad channel files"))
+                wanted.push_back (i);
+        }
     if (wanted.empty())
         for (int i = 0; i < archive.getNumEntries(); ++i)
             if (auto* e = archive.getEntry (i); e != nullptr && isAudio (e->filename))
@@ -162,17 +308,28 @@ SharedState::SharedState()
     auto folder = getIRFolder();
     if (! folder.isDirectory())
     {
-        folder = autoDetectFolder();
+        folder = autoDetectFolder (IROrigin::Combined);
         if (folder.isDirectory())
             settings->setValue (Keys::irFolder, folder.getFullPathName());
     }
+    auto splitFolder = getSplitFolder();
+    if (! splitFolder.isDirectory())
+    {
+        splitFolder = autoDetectFolder (IROrigin::Split);
+        if (splitFolder.isDirectory())
+            settings->setValue (Keys::splitFolder, splitFolder.getFullPathName());
+    }
     {
         const ScopedLock sl (libraryLock);
-        library.scan (folder);
+        library.scan (folder, splitFolder, getOwnFolder());
     }
 
     installer.onFinished = [this] (bool ok) {
-        if (ok) setIRFolder (installer.getDestination());
+        if (! ok) return;
+        const auto kind = installer.getKind();
+        if (kind == IRInstaller::Kind::Split) setSplitFolder (installer.getDestination());
+        else if (kind == IRInstaller::Kind::Other) setOwnFolder (installer.getDestination().getParentDirectory());
+        else setIRFolder (installer.getDestination());
     };
     userPresets = std::make_unique<UserPresetLibrary> (*settings);
     userPresets->rescan();
@@ -197,6 +354,12 @@ File& SharedState::installFolderOverride()
     return f;
 }
 
+bool& SharedState::searchTypicalPlaces()
+{
+    static bool search = true;
+    return search;
+}
+
 File SharedState::getDefaultInstallFolder()
 {
     if (installFolderOverride() != File())
@@ -209,29 +372,45 @@ File SharedState::getDefaultInstallFolder()
     return base.getChildFile ("Concert7").getChildFile ("Impulse Responses");
 }
 
-File SharedState::autoDetectFolder()
+File SharedState::getDefaultSplitInstallFolder()
 {
-    if (getDefaultInstallFolder().isDirectory())
-        return getDefaultInstallFolder();
+    return getDefaultInstallFolder().getSiblingFile ("Split Captures");
+}
 
+File SharedState::getDefaultOwnInstallFolder()
+{
+    return getDefaultInstallFolder().getSiblingFile ("Other Impulse Responses");
+}
+
+File SharedState::autoDetectFolder (IROrigin kind)
+{
+    const auto installed = kind == IROrigin::Split ? getDefaultSplitInstallFolder() : getDefaultInstallFolder();
+    if (installed.isDirectory())
+        return installed;
+    if (! searchTypicalPlaces())
+        return {};
+
+    // an unpacked M7 library in Downloads, Music or Documents: a folder named after the hardware that holds presets
+    // of that kind. Of a library unpacked into several folders (one per file variant) the quad files are preferred.
     for (auto base : { File::getSpecialLocation (File::userHomeDirectory).getChildFile ("Downloads"),
                        File::getSpecialLocation (File::userMusicDirectory),
                        File::getSpecialLocation (File::userDocumentsDirectory) })
     {
         if (! base.isDirectory()) continue;
-        File variantFolder;
+        File found;
         for (const auto& entry : RangedDirectoryIterator (base, false, "*", File::findDirectories))
         {
             const auto f = entry.getFile();
-            if (! f.getFileName().startsWithIgnoreCase ("Samplicity - Bricasti")) continue;
-            // Finder wraps the archive in one folder; "unzip" puts the variant folders side by side
-            if (! f.getFileName().containsIgnoreCase ("files"))
-                return f;
-            if (variantFolder == File() || f.getFileName().containsIgnoreCase ("quad"))
-                variantFolder = f;
+            if (! f.getFileName().containsIgnoreCase ("Bricasti")) continue;
+            IRLibrary probe;
+            probe.scan (f);
+            if (! probe.has (kind) || (kind == IROrigin::Combined && probe.has (IROrigin::Split) && ! probe.has (IROrigin::Combined)))
+                continue;
+            if (found == File() || f.getFileName().containsIgnoreCase ("quad"))
+                found = f;
         }
-        if (variantFolder.isDirectory())
-            return variantFolder;
+        if (found.isDirectory())
+            return found;
     }
     return {};
 }
@@ -249,11 +428,49 @@ void SharedState::setIRFolder (const File& folder)
     rescan();
 }
 
+File SharedState::getSplitFolder() const
+{
+    const auto path = settings->getValue (Keys::splitFolder);
+    return path.isEmpty() ? File() : File (path);
+}
+
+void SharedState::setSplitFolder (const File& folder)
+{
+    settings->setValue (Keys::splitFolder, folder.getFullPathName());
+    settings->saveIfNeeded();
+    rescan();
+}
+
+File SharedState::getOwnFolder() const
+{
+    const auto path = settings->getValue (Keys::ownFolder);
+    return path.isEmpty() ? File() : File (path);
+}
+
+void SharedState::setOwnFolder (const File& folder)
+{
+    settings->setValue (Keys::ownFolder, folder.getFullPathName());
+    settings->saveIfNeeded();
+    rescan();
+}
+
+void SharedState::useFolder (const File& folder, bool asOwn)
+{
+    IRLibrary probe;
+    probe.scan (folder);
+    if (asOwn || (! probe.has (IROrigin::Combined) && ! probe.has (IROrigin::Split)))
+        setOwnFolder (folder);
+    else if (probe.has (IROrigin::Split) && ! probe.has (IROrigin::Combined))
+        setSplitFolder (folder);
+    else
+        setIRFolder (folder);
+}
+
 void SharedState::rescan()
 {
     {
         const ScopedLock sl (libraryLock);
-        library.scan (getIRFolder());
+        library.scan (getIRFolder(), getSplitFolder(), getOwnFolder());
     }
     sendChangeMessage();
 }
@@ -285,18 +502,48 @@ int SharedState::indexOfPreset (const String& id) const
     return library.indexOf (id);
 }
 
-String SharedState::getPresetIdForErPattern (int pattern) const
+String SharedState::getPresetIdForErPattern (int pattern, IROrigin origin) const
 {
     const ScopedLock sl (libraryLock);
-    const auto& list = library.getErPatternPresets();
+    // OTHER takes the patterns of an M7 library (the combined one when both are there)
+    if (origin == IROrigin::User || ! library.has (origin))
+        origin = library.has (IROrigin::Combined) ? IROrigin::Combined : IROrigin::Split;
+    const auto& list = library.getErPatternPresets (origin);
     if (! isPositiveAndNotGreaterThan (pattern, (int) list.size()) || pattern == 0) return {};
     return library.getPresets()[(size_t) list[(size_t) pattern - 1]].id;
 }
 
-String SharedState::getDefaultPresetId() const
+String SharedState::getDefaultPresetId (IROrigin origin) const
 {
     const ScopedLock sl (libraryLock);
+    const auto first = library.firstPresetId (origin);
+    if (first.isNotEmpty()) return first;
     return library.getPresets().empty() ? String() : library.getPresets().front().id;
+}
+
+String SharedState::getCounterpart (const String& id, IROrigin target) const
+{
+    const ScopedLock sl (libraryLock);
+    return library.counterpart (id, target);
+}
+
+bool SharedState::hasLibrary (IROrigin origin) const
+{
+    const ScopedLock sl (libraryLock);
+    return library.has (origin);
+}
+
+IROrigin SharedState::getPreferredOrigin() const
+{
+    const auto value = settings->getValue (Keys::library);
+    return value == "split" ? IROrigin::Split : value == "own" ? IROrigin::User : IROrigin::Combined;
+}
+
+void SharedState::setPreferredOrigin (IROrigin origin)
+{
+    if (origin == getPreferredOrigin()) return;
+    settings->setValue (Keys::library, origin == IROrigin::Split ? "split" : origin == IROrigin::User ? "own" : "combined");
+    settings->saveIfNeeded();
 }
 
 void SharedState::withLibrary (const std::function<void (const IRLibrary&)>& f) const

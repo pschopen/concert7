@@ -41,5 +41,5 @@ echo "  VST3        $VST3/Concert7.vst3"
 echo "  LV2         $LV2/Concert7.lv2"
 echo "  Standalone  $BIN/Concert7"
 echo
-echo "Impulse responses: open Concert7, its setup screen guides you through installing the free"
-echo "Bricasti M7 library by Samplicity."
+echo "Impulse responses: open Concert7, its setup screen guides you through installing a library"
+echo "(a .7z archive needs bsdtar, or unpack it yourself)."

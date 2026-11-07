@@ -3,7 +3,9 @@
 //
 // concert7-dev: developer tool for testing the plugin without a DAW.
 //
-//   concert7-dev test     [--irs DIR] [--category dsp|library|processor] [--seed N]
+//   concert7-dev test     [--irs DIR] [--split DIR] [--category dsp|library|processor] [--seed N]
+//                         (--split: a library of split captures, also for the other commands; --own DIR for
+//                         render / ir / snapshot / bench: a folder of other impulse responses)
 //   concert7-dev render   --in IN.wav --out OUT.wav [--irs DIR] [--preset ID] [--set id=value ...]
 //                         [--block N] [--tail SECONDS] [--sr RATE]
 //   concert7-dev ir       --out IR.wav [--preset ID] [--set id=value ...] [--sr RATE]
@@ -94,6 +96,10 @@ namespace
         auto proc = std::make_unique<Concert7Processor>();
         if (test::irFolder().isDirectory() && proc->getShared().getIRFolder() != test::irFolder())
             proc->getShared().setIRFolder (test::irFolder());
+        if (test::splitFolder().isDirectory() && proc->getShared().getSplitFolder() != test::splitFolder())
+            proc->getShared().setSplitFolder (test::splitFolder());
+        if (hasArg (args, "--own"))
+            proc->getShared().setOwnFolder (fileArg (args, "--own"));
         if (hasArg (args, "--preset"))
             proc->selectPreset (argValue (args, "--preset"), userPreset);
         proc->setLowCpu (hasArg (args, "--lowcpu"));
@@ -321,6 +327,7 @@ namespace
         {
             SharedResourcePointer<SharedState> shared;
             if (test::irFolder().isDirectory()) shared->setIRFolder (test::irFolder());
+            if (test::splitFolder().isDirectory()) shared->setSplitFolder (test::splitFolder());
             IRPreset p;
             if (! shared->getPreset (argValue (args, "--preset"), p)) { std::cerr << "unknown preset" << std::endl; return 1; }
             String err;
@@ -494,15 +501,17 @@ namespace
         const bool ok = IRInstaller::extractArchive (zip, dest, {}, error);
         IRLibrary lib;
         lib.scan (dest);
+        const int sam = lib.count (IROrigin::Combined), ls = lib.count (IROrigin::Split);
         std::cout << (ok ? "extracted" : "FAILED: " + error) << " in " << (Time::getMillisecondCounterHiRes() - t0) / 1000.0
-                  << " s, " << lib.numBricastiPresets() << " Bricasti presets found in " << dest.getFullPathName() << std::endl;
-        return ok && lib.numBricastiPresets() == 134 ? 0 : 1;
+                  << " s, " << sam << " combined and " << ls << " split presets found in " << dest.getFullPathName() << std::endl;
+        return ok && (sam == 134 || ls == 221) ? 0 : 1;
     }
 
     int listPresets (const ArgumentList&)
     {
         SharedResourcePointer<SharedState> shared;
         if (test::irFolder().isDirectory()) shared->setIRFolder (test::irFolder());
+        if (test::splitFolder().isDirectory()) shared->setSplitFolder (test::splitFolder());
         for (int i = 0; i < shared->getNumPresets(); ++i)
         {
             IRPreset p;
@@ -527,6 +536,8 @@ int main (int argc, char* argv[])
     SharedState::settingsFileOverride().deleteFile();
     SharedState::installFolderOverride() = File::getSpecialLocation (File::tempDirectory).getChildFile ("concert7-dev-install");
     SharedState::installFolderOverride().deleteRecursively();
+    SharedState::getDefaultSplitInstallFolder().deleteRecursively();
+    SharedState::searchTypicalPlaces() = false;
     UserPresetLibrary::folderOverride() = File::getSpecialLocation (File::tempDirectory).getChildFile ("concert7-dev-presets");
     UserPresetLibrary::folderOverride().deleteRecursively();
 
@@ -535,6 +546,11 @@ int main (int argc, char* argv[])
         test::irFolder() = File::getCurrentWorkingDirectory().getChildFile (irs);
     if (irs.isNotEmpty() && ! test::irFolder().isDirectory())
         std::cerr << "IR folder not found: " << irs << std::endl;
+    const String ls = argValue (args, "--split", SystemStats::getEnvironmentVariable ("CONCERT7_SPLIT_DIR", {}));
+    if (ls.isNotEmpty())
+        test::splitFolder() = File::getCurrentWorkingDirectory().getChildFile (ls);
+    if (ls.isNotEmpty() && ! test::splitFolder().isDirectory())
+        std::cerr << "Split captures folder not found: " << ls << std::endl;
 
     const String command = args.size() > 0 ? args[0].text : "test";
     int result = 0;

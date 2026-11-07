@@ -54,7 +54,17 @@ struct SourceIR
     bool trueStereo = false;
     std::array<std::vector<float>, 4> ch;
 
-    // analysis results
+    // split captures: the early reflections and the late reverb as recorded on their own, ch is their sum (all of the
+    // same length). The late reverb starts together with the reflections, so nothing is cut at a crossover: the early
+    // part is earlyBlock, the late part lateBlock. Empty for the other libraries.
+    std::array<std::vector<float>, 4> earlyBlock, lateBlock;
+    // a second take of the late reverb where the takes have their own fine structure (the M7's second banks):
+    // the same envelope and spectrum, for the modulation's variant. Same scale as lateBlock, empty otherwise.
+    std::array<std::vector<float>, 4> lateTake;
+    bool hasBlocks() const { return ! lateBlock[0].empty(); }
+    bool hasLateTake() const { return ! lateTake[0].empty(); }
+
+    // analysis results (of the late block where there is one)
     int onset = 0;               // first sample of the direct sound / first reflection
     float nativeRT = 1.0f;       // RT60 in the 500 Hz .. 2 kHz bands
     std::vector<float> bandFreq;
@@ -83,7 +93,7 @@ struct SourceIR
 /** How DECAY gets to its reverb time. Nobody knows which of them the M7 itself does (there are no recordings of one
     program at several decays), so the user chooses.
     Sabine: only the wall part of the decay rate scales, air absorption stays; the late reverb starts a little lower
-            the longer it rings (energy ~ RT^0.45, from the LiquidSonics captures).
+            the longer it rings (energy ~ RT^0.45, from the split captures).
     Proportional: every frequency scales with the same factor (the M7's HF / LF RT MPY are multipliers of the reverb
             time); level as Sabine. Long settings keep the brilliance of the highs.
     ConstantLevel: Sabine, and the reverb keeps the loudness of the preset at every decay.
@@ -159,6 +169,12 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
     response, gainDb (energy) on top. */
 std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channels, bool trueStereo,
                                         double sourceRate, double hostRate, const juce::String& name, float gainDb = 0.0f);
+
+/** The same from the early reflections and the late reverb recorded on their own (split captures): ch is
+    their sum at the files' levels. lateTake (may be empty): another take of the late reverb. */
+std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> early, std::array<std::vector<float>, 4> late,
+                                        std::array<std::vector<float>, 4> lateTake, bool trueStereo, double sourceRate,
+                                        double hostRate, const juce::String& name, float gainDb = 0.0f);
 
 /** Fills the analysis fields of a SourceIR. Called by loadSourceIR / makeSourceIR. */
 void analyseSourceIR (SourceIR& src);

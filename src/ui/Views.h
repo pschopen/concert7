@@ -96,8 +96,9 @@ private:
 
 /**
     First run / setup panel. The impulse responses are not part of Concert7: the user
-    opens Samplicity's page, downloads the ZIP and drops it here (or picks it); the
-    plugin checks and extracts it. An already extracted folder can be chosen as well.
+    chooses a library (SAM, LS: the two M7 libraries Concert7 is tested with, OTHER:
+    any other), downloads its archive and drops it here (or picks it); the plugin
+    checks and extracts it. An already extracted folder can be chosen as well.
 */
 class WelcomeOverlay : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
@@ -108,9 +109,11 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void refresh();
+    /** Which library the steps are about. */
+    void showLibrary (IROrigin library);
     void chooseZip();
     void chooseFolder();
-    /** Same as dropping a file: a ZIP is installed, a folder is used as the IR folder. */
+    /** Same as dropping a file: an archive is installed, a folder is used (OTHER: as the own folder). */
     void acceptFile (const juce::File& f);
     void setDragHighlight (bool on) { dragOver = on; repaint(); }
 
@@ -134,6 +137,9 @@ private:
 
     Concert7Processor& processor;
     juce::TextButton pageButton, zipButton, folderButton, closeButton;
+    juce::TextButton samTab { "SAM" }, lsTab { "LS" }, otherTab { "OTHER" };
+    IROrigin library = IROrigin::Combined;
+    bool lsPageOpened = false;
     double progressValue = 0.0;
     juce::ProgressBar progressBar { progressValue };
     std::unique_ptr<juce::FileChooser> chooser;

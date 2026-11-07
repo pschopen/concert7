@@ -13,8 +13,15 @@
 
 namespace concert7::test
 {
-/** Folder with the Samplicity Bricasti IRs (env CONCERT7_IR_DIR or --irs). Empty = library tests are skipped. */
+/** Folder with a combined M7 library (env CONCERT7_IR_DIR or --irs). Empty = library tests are skipped. */
 inline juce::File& irFolder()
+{
+    static juce::File f;
+    return f;
+}
+
+/** Folder with a library of split M7 captures (env CONCERT7_SPLIT_DIR or --split). Empty = their tests are skipped. */
+inline juce::File& splitFolder()
 {
     static juce::File f;
     return f;

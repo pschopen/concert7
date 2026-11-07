@@ -34,6 +34,7 @@ namespace
     constexpr float kEndWindowSeconds = 0.08f;  // ... averaged over +- this
     constexpr float kEndBackoffSeconds = 0.5f;  // ... and at most this much (or half the late range) earlier than the
                                                 //     fade / floor detection
+    constexpr double kFloorFlatness   = 0.1;    // a noise floor before a fade-out changes by less than this share of the decay rate
     constexpr float kSmoothCutDb      = 9.0f;   // Smooth: largest cut of a resonance / envelope bump
     constexpr float kSmoothBoostDb    = 3.0f;   // Smooth: largest lift of a dip
     constexpr float kSmoothRampSeconds = 0.05f; // Smooth: envelope correction fades in after the split
@@ -50,6 +51,7 @@ namespace
     constexpr float kVariantMatchSeconds = 0.01f; // late variant: block length of its energy match
     constexpr float kVariantMaxGain   = 4.0f;
     constexpr int64 kVariantSeed      = 0x7a11;
+    constexpr double kOwnTakeCorrelation = 0.5; // split captures: a take below this correlation is a variant of its own
     constexpr double kPi = MathConstants<double>::pi;
 
     int stftSizeFor (double sr) { return sr <= 50000.0 ? 2048 : (sr <= 100000.0 ? 4096 : 8192); }
@@ -284,7 +286,7 @@ namespace
         The recording only gives the sum, so it is split: the walls absorb the highs at least as much as the
         mids, whatever shortens the highs beyond that is air - at most as much as air can (ISO 9613-1).
         Below the mids the reverb time changes by at most DECAY's own factor: without air the bass would follow the
-        wall factor alone, a little more than the mids (a long bass, as in the Samplicity recordings, grows longer
+        wall factor alone, a little more than the mids (a long bass, as in some of the recordings, grows longer
         than the reverb around it).
         Proportional (DecayMode::Proportional): every frequency with the same factor. */
     struct DecayScaling
@@ -526,7 +528,9 @@ std::vector<float> resample (const std::vector<float>& in, double srcRate, doubl
 void analyseSourceIR (SourceIR& src)
 {
     const double sr = src.sampleRate;
-    auto channels = activeChannels (src.ch, src.trueStereo);
+    // the late reverb: the recording of it alone where there is one (split captures), else the whole response, whose
+    // reverb times are fitted from the start of the late reverb on. The onset is the whole response's.
+    auto channels = activeChannels (src.hasBlocks() ? src.lateBlock : src.ch, src.trueStereo);
     src.onset = detectOnset (src.ch, sr);
 
     const auto centres = thirdOctaveCentres (sr);
@@ -584,19 +588,42 @@ void analyseSourceIR (SourceIR& src)
         const int mFit = std::min (mLate, std::max (m0, last - 8));
         float rt = fitRT (e, mFit, frameSeconds, last + 1);
         int validEnd = last;
+        bool noiseOnly = false;   // never 20 dB above its floor: no decay to measure, the neighbours give it
         for (int iteration = 0; iteration < 2 && span >= 8; ++iteration)
         {
             const double reverbSlope = std::isfinite (rt) ? -60.0 / rt * frameSeconds : -1.0; // dB per frame
 
-            // Recordings either end in a noise floor (flat tail) or are cut / faded while still decaying.
-            const int w0 = last - std::max (4, span / 5);
-            const auto tail = lineFit (level, w0, last);
-            const bool hasFloor = tail.second > 0.3 * reverbSlope;
+            // Recordings either end in a noise floor (flat tail) or are cut / faded while still decaying. The late
+            // reverb recorded on its own (split captures) reaches its floor and is faded out after it: then the floor is
+            // the flat part before the fade. (Not looked for in the other recordings, whose analysis stays as it was.)
+            int w0 = last - std::max (4, span / 5), w1 = last;
+            bool hasFloor = false;
+            if (src.hasBlocks())
+            {
+                // the latest level stretch, well below the peak, in the second half of the range: flat compared with the
+                // band's own first 20 dB of decay (the reverb time of a band that runs into its floor is still too long
+                // here, and a long recording is mostly floor)
+                int m20 = peakFrame + 1;
+                while (m20 < last && level[(size_t) m20] > peakDb - 20.0f) ++m20;
+                noiseOnly = m20 > peakFrame + span / 2; // (or only in the fade at the end)
+                const double decayRate = 20.0 / std::max (1, m20 - peakFrame); // dB per frame
+                const int win = std::max (4, span / 6);
+                for (int b1 = last - std::max (2, span / 20); ! noiseOnly && b1 - win > peakFrame + span / 2 && ! hasFloor; --b1)
+                    if (level[(size_t) (b1 - win)] < peakDb - 20.0f
+                        && std::abs (lineFit (level, b1 - win, b1).second) < kFloorFlatness * decayRate)
+                    {
+                        hasFloor = true;
+                        w0 = b1 - win;
+                        w1 = b1;
+                    }
+            }
+            if (! hasFloor)
+                hasFloor = lineFit (level, w0, last).second > 0.3 * reverbSlope;
             double noisePower = 0.0;
             validEnd = last;
             if (hasFloor)
             {
-                std::vector<float> t (level.begin() + w0, level.begin() + last + 1);
+                std::vector<float> t (level.begin() + w0, level.begin() + w1 + 1);
                 std::nth_element (t.begin(), t.begin() + (long) t.size() / 2, t.end());
                 const float floorDb = t[t.size() / 2];
                 noisePower = std::pow (10.0, floorDb / 10.0);
@@ -635,7 +662,7 @@ void analyseSourceIR (SourceIR& src)
                 rt = (float) (-60.0 / (line.second / frameSeconds));
         }
         fitRange[b] = { fitA, std::max (fitA, validEnd) };
-        src.bandRT[b] = rt;
+        src.bandRT[b] = noiseOnly ? std::numeric_limits<float>::quiet_NaN() : rt;
         src.bandValidEnd[b] = (float) ((validEnd * be.hop - src.onset) / sr);
         src.bandLevelDb[b] = std::move (level);
     }
@@ -926,8 +953,12 @@ float estimateRT (const std::vector<const std::vector<float>*>& channels, double
 }
 
 //==============================================================================
-std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channels, bool trueStereo,
-                                        double sourceRate, double hostRate, const String& name, float gainDb)
+namespace
+{
+/** makeSourceIR of one response (parts[0]) or of its blocks (parts: early, late and, if any, another take of the
+    late reverb). All parts are trimmed and resampled alike and get the same gain, the whole response's. */
+std::shared_ptr<SourceIR> makeSource (std::vector<std::array<std::vector<float>, 4>> parts, bool trueStereo,
+                                      double sourceRate, double hostRate, const String& name, float gainDb)
 {
     auto src = std::make_shared<SourceIR>();
     src->name = name;
@@ -935,34 +966,51 @@ std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channe
     src->sampleRate = hostRate;
     src->trueStereo = trueStereo;
 
-    if (! trueStereo)
-    {
-        channels[1].clear();
-        channels[2].clear();
-        if (channels[3].empty()) channels[3] = channels[0];
-    }
+    for (auto& channels : parts)
+        if (! trueStereo)
+        {
+            channels[1].clear();
+            channels[2].clear();
+            if (channels[3].empty()) channels[3] = channels[0];
+        }
 
     size_t maxLen = 0;
-    for (auto& c : channels)
-        maxLen = std::max (maxLen, c.size());
+    for (auto& channels : parts)
+        for (auto& c : channels)
+            maxLen = std::max (maxLen, c.size());
 
     // trim trailing silence (-120 dB re. peak) to save convolution time
     float peak = 0.0f;
-    for (auto& c : channels) for (float v : c) peak = std::max (peak, std::abs (v));
+    for (auto& channels : parts)
+        for (auto& c : channels) for (float v : c) peak = std::max (peak, std::abs (v));
     size_t used = 0;
-    for (auto& c : channels)
-        for (size_t i = c.size(); i-- > 0;)
-            if (std::abs (c[i]) > peak * 1e-6f) { used = std::max (used, i + 1); break; }
+    for (auto& channels : parts)
+        for (auto& c : channels)
+            for (size_t i = c.size(); i-- > 0;)
+                if (std::abs (c[i]) > peak * 1e-6f) { used = std::max (used, i + 1); break; }
     maxLen = std::min (maxLen, std::max<size_t> (used, 64));
 
     const int numUsed = trueStereo ? 4 : 2;
     const int idx[4] = { 0, 3, 1, 2 };
-    for (int i = 0; i < numUsed; ++i)
-    {
-        auto& c = channels[(size_t) idx[i]];
-        c.resize (maxLen, 0.0f);
-        src->ch[(size_t) idx[i]] = resample (c, sourceRate, hostRate);
-    }
+    for (auto& channels : parts)
+        for (int i = 0; i < numUsed; ++i)
+        {
+            auto& c = channels[(size_t) idx[i]];
+            c.resize (maxLen, 0.0f);
+            c = resample (c, sourceRate, hostRate);
+        }
+
+    const bool blocks = parts.size() >= 2;
+    if (blocks)
+        for (int i = 0; i < numUsed; ++i)
+        {
+            const auto c = (size_t) idx[i];
+            src->ch[c].resize (parts[0][c].size());
+            for (size_t n = 0; n < src->ch[c].size(); ++n)
+                src->ch[c][n] = parts[0][c][n] + parts[1][c][n];
+        }
+    else
+        src->ch = parts[0];
 
     // equal loudness for all presets: average output power for white noise input. The sum of squares of the
     // same response grows with the rate it is sampled at; scaled to kNormRate the level is the same at every rate.
@@ -973,11 +1021,52 @@ std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channe
     if (power > 1e-20)
     {
         const float g = (float) std::sqrt (kNormTargetPower / power * std::pow (10.0, gainDb / 10.0));
-        for (auto& c : src->ch) for (auto& v : c) v *= g;
+        if (blocks)
+        {
+            // the blocks are scaled, their sum is formed again: early + late gives ch exactly
+            for (auto& channels : parts)
+                for (auto& c : channels) for (auto& v : c) v *= g;
+            for (int i = 0; i < numUsed; ++i)
+            {
+                const auto c = (size_t) idx[i];
+                for (size_t n = 0; n < src->ch[c].size(); ++n)
+                    src->ch[c][n] = parts[0][c][n] + parts[1][c][n];
+            }
+        }
+        else
+            for (auto& c : src->ch) for (auto& v : c) v *= g;
+    }
+    if (blocks)
+    {
+        src->earlyBlock = std::move (parts[0]);
+        src->lateBlock = std::move (parts[1]);
+        if (parts.size() >= 3)
+            src->lateTake = std::move (parts[2]);
     }
 
     analyseSourceIR (*src);
     return src;
+}
+} // namespace
+
+std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channels, bool trueStereo,
+                                        double sourceRate, double hostRate, const String& name, float gainDb)
+{
+    std::vector<std::array<std::vector<float>, 4>> parts;
+    parts.push_back (std::move (channels));
+    return makeSource (std::move (parts), trueStereo, sourceRate, hostRate, name, gainDb);
+}
+
+std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> early, std::array<std::vector<float>, 4> late,
+                                        std::array<std::vector<float>, 4> lateTake, bool trueStereo, double sourceRate,
+                                        double hostRate, const String& name, float gainDb)
+{
+    std::vector<std::array<std::vector<float>, 4>> parts;
+    parts.push_back (std::move (early));
+    parts.push_back (std::move (late));
+    if (! lateTake[0].empty())
+        parts.push_back (std::move (lateTake));
+    return makeSource (std::move (parts), trueStereo, sourceRate, hostRate, name, gainDb);
 }
 
 std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate, String& error)
@@ -1008,6 +1097,55 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
     bool trueStereo = false;
     double sr = 0.0;
     AudioBuffer<float> a, b;
+
+    if (variant.hasBlocks())
+    {
+        // split captures: early reflections and late reverb of take 1, at the levels of the files
+        if (! readFile (variant.heads.front(), a, sr)) return nullptr;
+        double srTail = 0.0;
+        if (! readFile (variant.tails.front(), b, srTail)) return nullptr;
+        if (std::abs (sr - srTail) > 0.5)
+        {
+            error = "Different sample rates in " + preset.name;
+            return nullptr;
+        }
+        trueStereo = a.getNumChannels() >= 4 && b.getNumChannels() >= 4;
+        std::array<std::vector<float>, 4> early, late, take;
+        const int used[4] = { 0, trueStereo ? 1 : -1, trueStereo ? 2 : -1, trueStereo ? 3 : 1 };
+        for (int c = 0; c < 4; ++c)
+            if (used[c] >= 0)
+            {
+                early[(size_t) c] = chan (a, used[c]);
+                late[(size_t) c] = chan (b, used[c]);
+            }
+
+        // the next take, where it has a fine structure of its own (correlation of the late reverb clearly below 1)
+        if (variant.tails.size() >= 2)
+        {
+            AudioBuffer<float> t;
+            double srTake = 0.0;
+            const auto noError = error; // a take that cannot be read is no error, there is the synthesised variant
+            if (readFile (variant.tails[1], t, srTake) && std::abs (srTake - sr) < 0.5 && t.getNumChannels() == b.getNumChannels())
+            {
+                double ab = 0.0, aa = 0.0, bb = 0.0;
+                const int n = std::min (t.getNumSamples(), b.getNumSamples());
+                for (int c = 0; c < b.getNumChannels(); ++c)
+                {
+                    const float* x = b.getReadPointer (c);
+                    const float* y = t.getReadPointer (c);
+                    for (int i = 0; i < n; ++i) { ab += (double) x[i] * y[i]; aa += (double) x[i] * x[i]; bb += (double) y[i] * y[i]; }
+                }
+                const double rho = aa > 0.0 && bb > 0.0 ? ab / std::sqrt (aa * bb) : 1.0;
+                if (std::abs (rho) < kOwnTakeCorrelation)
+                    for (int c = 0; c < 4; ++c)
+                        if (used[c] >= 0) take[(size_t) c] = chan (t, used[c]);
+            }
+            error = noError;
+        }
+        auto src = makeSourceIR (std::move (early), std::move (late), std::move (take), trueStereo, sr, hostRate, preset.name);
+        src->presetId = preset.id;
+        return src;
+    }
 
     if (variant.quad != File() || variant.single != File())
     {
@@ -1070,6 +1208,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     if (len <= 0) return out;
 
     const std::vector<int> chans = src.trueStereo ? std::vector<int> { 0, 1, 2, 3 } : std::vector<int> { 0, 3 };
+    const bool blocks = src.hasBlocks();
 
     // ---- early / late crossover
     const float splitSec = jlimit (0.015f, kSplitMaxSeconds, 0.25f * src.nativeRT);
@@ -1119,7 +1258,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     }
 
     // DECAY and level, as on the M7: the early reflections (a block of their own) keep their level, the late reverb
-    // starts a little lower the longer it rings. In the LiquidSonics captures (both blocks at fixed levels) its start
+    // starts a little lower the longer it rings. In the split captures (both blocks at fixed levels) its start
     // falls by kLateLevelSlope dB per dB of 10 log10 of the reverb time, so its energy grows with RT^0.45: twice the
     // decay is 1.35 dB louder (a start that stays would be 3 dB, the same energy 0 dB). Across presets, where the
     // size changes with the decay too, so it is an estimate. Inside the early part the change fades in from the first
@@ -1132,24 +1271,41 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     const bool measureLevel = constantLevel && ! neutralLate;
     const int rampLength = std::max (1, splitA - src.onset);
 
-    // ---- early part (own or from the selected pattern)
+    // ---- early part (own or from the selected pattern). Recorded on its own (split captures) it is that block as it
+    // is, the late reverb is the other block; otherwise it is cut out of the response at the crossover.
     std::array<std::vector<float>, 4> early;
+    const SourceIR& es = pattern != nullptr ? *pattern : src;
+    const bool earlyBlock = blocks && es.hasBlocks();
+    int earlyLen = std::max (0, splitB);
+    if (earlyBlock)
+    {
+        // up to the end of the reflections (the block is padded to the length of the response)
+        earlyLen = 1;
+        for (int c : chans)
+        {
+            const int esChan = ! es.trueStereo && (c == 1 || c == 2) ? -1 : c;
+            if (esChan < 0) continue;
+            const auto& x = es.earlyBlock[(size_t) esChan];
+            for (int n = (int) x.size(); n-- > earlyLen;)
+                if (x[(size_t) n] != 0.0f) { earlyLen = n + 1; break; }
+        }
+        earlyLen = std::max (1, earlyLen - (pattern != nullptr ? pattern->onset - src.onset : 0));
+    }
     for (int c : chans)
     {
         auto& e = early[(size_t) c];
-        e.assign ((size_t) std::max (0, splitB), 0.0f);
-        const SourceIR& es = pattern != nullptr ? *pattern : src;
+        e.assign ((size_t) earlyLen, 0.0f);
         const int shift = pattern != nullptr ? pattern->onset - src.onset : 0;
         int esChan = c;
         if (! es.trueStereo && (c == 1 || c == 2)) esChan = -1;
         if (esChan >= 0)
         {
-            const auto& x = es.ch[(size_t) esChan];
+            const auto& x = earlyBlock ? es.earlyBlock[(size_t) esChan] : es.ch[(size_t) esChan];
             for (int n = 0; n < (int) e.size(); ++n)
             {
                 const int idx = n + shift;
                 if (idx >= 0 && idx < (int) x.size())
-                    e[(size_t) n] = x[(size_t) idx] * earlyWeight (n);
+                    e[(size_t) n] = earlyBlock ? x[(size_t) idx] : x[(size_t) idx] * earlyWeight (n);
             }
         }
 
@@ -1158,8 +1314,9 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
 
         // A shorter decay is a room that absorbs more: its early reflections fade with the same decay as the
         // late reverb, from the onset on (otherwise they keep their level and the response drops at the
-        // crossover). A longer decay leaves them as they are.
-        if (shorter && ! e.empty())
+        // crossover). A longer decay leaves them as they are. Reflections recorded on their own are a block of their
+        // own, as on the M7: the reverb time does not change them.
+        if (shorter && ! blocks && ! e.empty())
         {
             const int el = (int) e.size();
             std::vector<float> y ((size_t) el, 0.0f), norm ((size_t) el, 0.0f);
@@ -1178,7 +1335,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
             for (int n = 0; n < el; ++n)
                 e[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
         }
-        if (std::abs (lateLevelDb) > 1e-3f)
+        if (std::abs (lateLevelDb) > 1e-3f && ! blocks)
             for (int n = std::max (0, src.onset); n < (int) e.size(); ++n)
                 e[(size_t) n] *= Decibels::decibelsToGain (lateLevelDb * std::min (1.0f, (float) (n - src.onset) / (float) rampLength));
         if (measureLevel)
@@ -1186,15 +1343,24 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         lowPassInPlace (e, sr, p.erRolloffHz);
     }
 
-    // ---- late part
-    std::array<std::vector<float>, 4> late;
+    // ---- late part (and the modulation's variant from another take, where the recording has one)
+    std::array<std::vector<float>, 4> late, variantLate;
+    const bool takeVariant = p.splitLate && p.lateVariant && src.hasLateTake();
+    auto lateInput = [&] (const std::array<std::vector<float>, 4>& from, int c, std::vector<float>& x) {
+        x.assign ((size_t) len, 0.0f);
+        if (blocks)
+            std::copy (from[(size_t) c].begin(), from[(size_t) c].begin() + std::min (len, (int) from[(size_t) c].size()), x.begin());
+        else
+            for (int n = std::max (0, splitA); n < len; ++n)
+                x[(size_t) n] = from[(size_t) c][(size_t) n] * (1.0f - earlyWeight (n));
+    };
     if (neutralLate)
     {
         for (int c : chans)
         {
-            late[(size_t) c].assign ((size_t) len, 0.0f);
-            for (int n = std::max (0, splitA); n < len; ++n)
-                late[(size_t) c][(size_t) n] = src.ch[(size_t) c][(size_t) n] * (1.0f - earlyWeight (n));
+            lateInput (blocks ? src.lateBlock : src.ch, c, late[(size_t) c]);
+            if (takeVariant)
+                lateInput (src.lateTake, c, variantLate[(size_t) c]);
         }
     }
     else
@@ -1229,7 +1395,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
 
         const int lateLen = std::min ((int) (kMaxIRSeconds * sr), src.onset + (int) (tailSeconds * sr) + N);
         const int outFrames = stft.numFrames (lateLen);
-        const int firstFrame = std::max (0, (splitA - N / 2) / hop - 1);
+        const int firstFrame = blocks ? 0 : std::max (0, (splitA - N / 2) / hop - 1);
 
         // per band and frame: largest gain that keeps the level at most kCapMarginDb above the target line
         const size_t numBands = src.bandFreq.size();
@@ -1337,11 +1503,10 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         std::vector<float> lateIn ((size_t) len), refAmp ((size_t) bins), refTime ((size_t) bins);
         const float synthGain = std::sqrt ((float) N / (float) hop); // incoherent overlap-add compensation
 
-        for (size_t ci = 0; ci < chans.size(); ++ci)
-        {
+        // the late reverb of channel ci from lateIn: the measured part modified, the continuation synthesised with
+        // random phases drawn from seed (another seed for the variant: its continuation has its own fine structure)
+        auto resynthesise = [&] (size_t ci, int64 seed, bool measure) {
             const int c = chans[ci];
-            for (int n = 0; n < len; ++n)
-                lateIn[(size_t) n] = src.ch[(size_t) c][(size_t) n] * (1.0f - earlyWeight (n));
 
             // analysis of the measured late part
             const int storedFrames = std::max (0, srcFrames - firstFrame);
@@ -1399,13 +1564,13 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
 
             // resynthesis
             std::vector<float> y ((size_t) lateLen, 0.0f), norm ((size_t) lateLen, 0.0f);
-            Random channelRng (0x5eed + 7919 * c); // DecayMode::Original: each channel its own noise
+            Random channelRng (seed + 7919 * c); // DecayMode::Original: each channel its own noise
             for (int m = firstFrame; m < outFrames; ++m)
             {
                 const float t = frameTime (m);
                 const bool haveMeasured = m < srcFrames;
                 const size_t off = haveMeasured ? (size_t) (m - firstFrame) * (size_t) bins : 0;
-                Random rng (frameSeed (0x5eed, m)); // per frame: the same draws for every channel
+                Random rng (frameSeed (seed, m)); // per frame: the same draws for every channel
 
                 for (int k = 0; k < bins; ++k)
                 {
@@ -1461,12 +1626,24 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
             for (int n = 0; n < fadeLen; ++n)
                 y[(size_t) (lateLen - 1 - n)] *= (float) (0.5 - 0.5 * std::cos (kPi * n / fadeLen));
 
-            if (measureLevel)
+            if (measure)
             {
                 lateEnergyNative += midBandEnergy (lateIn, sr);
                 lateEnergy += midBandEnergy (y, sr);
             }
-            late[(size_t) c] = std::move (y);
+            return y;
+        };
+
+        for (size_t ci = 0; ci < chans.size(); ++ci)
+        {
+            const int c = chans[ci];
+            lateInput (blocks ? src.lateBlock : src.ch, c, lateIn);
+            late[(size_t) c] = resynthesise (ci, 0x5eed, measureLevel);
+            if (takeVariant)
+            {
+                lateInput (src.lateTake, c, lateIn);
+                variantLate[(size_t) c] = resynthesise (ci, 0x7a4e, false);
+            }
         }
 
         // the user's roll-off and Smooth stay: the late energy without them (staticAmp over the mid bins, weighted
@@ -1581,8 +1758,8 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     // ---- modulation: early part, late reverb and its variant as responses of their own
     if (p.splitLate)
     {
-        std::array<std::vector<float>, 4> variantLate;
-        if (p.lateVariant)
+        // the variant: the same late reverb from another take, else with new random phases
+        if (p.lateVariant && ! takeVariant)
             variantLate = makeVariant (late, chans, sr);
         const std::vector<float> none;
         for (int c : chans)
@@ -1628,8 +1805,10 @@ std::shared_ptr<const SourceIR> stretchedSource (const SourceIR& src, float fact
             return src.stretched;
     }
     // taken as recorded at 1 / factor of its rate and resampled back, the response lasts factor times as long
-    auto st = makeSourceIR (src.ch, src.trueStereo, src.sampleRate / factor, src.sampleRate, src.name,
-                            (1.0f - kLateLevelSlope) * 10.0f * std::log10 (factor));
+    const float gainDb = (1.0f - kLateLevelSlope) * 10.0f * std::log10 (factor);
+    auto st = src.hasBlocks() ? makeSourceIR (src.earlyBlock, src.lateBlock, src.lateTake, src.trueStereo, src.sampleRate / factor,
+                                              src.sampleRate, src.name, gainDb)
+                              : makeSourceIR (src.ch, src.trueStereo, src.sampleRate / factor, src.sampleRate, src.name, gainDb);
     st->presetId = src.presetId;
     const std::lock_guard<std::mutex> lk (cacheLock);
     src.stretched = st;

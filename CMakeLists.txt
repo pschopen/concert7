@@ -140,6 +140,7 @@ if(CONCERT7_BUILD_DEVTOOLS)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/DspTests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/DistanceTests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/LibraryTests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/SplitLibraryTests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/ProcessorTests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/StateTests.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/AUOffline.cpp")

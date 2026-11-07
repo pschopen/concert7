@@ -69,6 +69,7 @@ private:
     std::vector<std::unique_ptr<juce::TextButton>> categoryButtons, tagButtons;
     juce::StringArray categories, tags, selectedTags;
     juce::String category;
+    IROrigin shownLibrary = IROrigin::Combined;   // the library whose presets are listed
     int filter = kAll;
     juce::ListBox list { "Presets", this };
     juce::TextButton saveButton { "SAVE" }, saveAsButton { "SAVE AS..." }, editButton { "EDIT..." },

@@ -108,10 +108,9 @@ jobs:
             echo "The installers are not signed. macOS: *System Settings → Privacy & Security → Open Anyway*;"
             echo "Windows: *More info → Run anyway*. Details in the README."
             echo
-            echo "**Impulse responses required:** download the free Bricasti M7 library from"
-            echo "[Samplicity](https://samplicity.com/downloads/) (listed at the bottom of the page)"
-            echo "and drop the ZIP onto Concert7's setup screen. Samplicity provides it for free –"
-            echo "if you use it, you can support them by buying one of their reverb plugins."
+            echo "**Impulse responses required:** none are included. Concert7's setup screen links to two free"
+            echo "Bricasti M7 libraries it is tested with (SAM, LS); other libraries and your own impulse responses"
+            echo "work too (OTHER). Drop the downloaded archive onto the setup screen."
           } > notes.md
           # published as a regular "Latest" release (the version name shows beta status);
           # pre-releases never appear in the repository's Releases sidebar

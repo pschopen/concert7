@@ -26,6 +26,8 @@ namespace Colours
     inline const juce::Colour ledOn        { 0xff57c7ff };
     inline const juce::Colour ledOff       { 0xff1a2a35 };
     inline const juce::Colour warning      { 0xffffb347 };
+    inline const juce::Colour tray         { 0xff131519 };   // recessed box in the faceplate (with folder tabs on it)
+    inline const juce::Colour trayEdge     { 0xff0a0b0d };
 }
 
 juce::Font uiFont (float height, bool bold = false);
