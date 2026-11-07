@@ -187,6 +187,49 @@ public:
             expectWithinAbsoluteError (getParam (proc, ParamID::decay), jlimit (0.2f, 30.0f, st.nativeRT), 0.02f);
         }
 
+        beginTest ("a preset just chosen is the recording itself: nothing changes before the user changes something");
+        {
+            auto expectRecording = [&] (const String& id) {
+                IRPreset preset;
+                expect (proc.getShared().getPreset (id, preset), id);
+                String err;
+                auto src = loadSourceIR (preset, 48000.0, err);
+                auto ir = proc.getCurrentIR();
+                expect (src != nullptr && ir != nullptr, id + " " + err);
+                if (src == nullptr || ir == nullptr) return;
+                expectEquals (ir->presetId, id);
+                float maxDiff = 0.0f;
+                for (size_t c = 0; c < 4; ++c)
+                {
+                    // the whole response: early part plus the late reverb when modulation splits it off
+                    std::vector<float> x (ir->ch[c]);
+                    x.resize ((size_t) std::max ({ (int) x.size(), (int) ir->late[c].size(), src->length() }), 0.0f);
+                    for (size_t i = 0; i < ir->late[c].size(); ++i) x[i] += ir->late[c][i];
+                    for (size_t i = 0; i < x.size(); ++i)
+                        maxDiff = std::max (maxDiff, std::abs (x[i] - (i < src->ch[c].size() ? src->ch[c][i] : 0.0f)));
+                }
+                expectLessThan (maxDiff, 1e-6f, id + ": the impulse response");
+                expectEquals ((int) ir->envelopeDb.size(), (int) ir->nativeEnvelopeDb.size());
+                float envDiff = 0.0f;
+                for (size_t i = 0; i < ir->envelopeDb.size() && i < ir->nativeEnvelopeDb.size(); ++i)
+                    envDiff = std::max (envDiff, std::abs (ir->envelopeDb[i] - ir->nativeEnvelopeDb[i]));
+                expectLessThan (envDiff, 0.01f, id + ": the display");
+            };
+            expectRecording (proc.getPresetId());
+
+            // after the user changed things: choosing a preset, the same one too, starts from the recording again
+            for (auto* id : { "Halls/02 Medium Hall", "Halls/02 Medium Hall", "Plates/01 Bright Plate" })
+            {
+                setParam (proc, ParamID::decay, 7.0f);
+                setParam (proc, ParamID::lateRolloff, 5000.0f);
+                setParam (proc, ParamID::smooth, 50.0f);
+                settle (proc);
+                proc.selectPreset (id, true);
+                settle (proc);
+                expectRecording (id);
+            }
+        }
+
         beginTest ("state save / restore");
         {
             setParam (proc, ParamID::predelay, 42.0f);

@@ -17,7 +17,8 @@ namespace ParamID
     inline constexpr const char* predelayNote  = "predelayNote";
     inline constexpr const char* irOffset      = "irOffset";
     inline constexpr const char* decay         = "decay";
-    inline constexpr const char* early         = "early";
+    inline constexpr const char* decayMode     = "decayMode";
+    inline constexpr const char* early        = "early";
     inline constexpr const char* late          = "late";
     inline constexpr const char* mix           = "mix";
     inline constexpr const char* gain          = "gain";
@@ -97,6 +98,11 @@ enum class Crossfeed { TrueStereo = 0, NoCrossfeed, MonoIn };
 /** Modulation modes. Vibrato moves the pitch of the whole reverb (the mode of 0.1.x). The others leave the
     early reflections alone and move only the late reverb: Chorus its pitch, Drift its fine structure. */
 enum class ModMode { Vibrato = 0, Chorus, Drift, DriftChorus };
+
+/** Names of the decay modes (DecayMode in IRDesigner.h, same order). */
+juce::StringArray decayModeNames();
+/** Short tag for the display, empty for the default mode. */
+juce::String decayModeTag (int mode);
 
 /** Note values available for tempo synced pre-delay / delay, in quarter notes. */
 struct NoteValue { const char* name; double quarters; };

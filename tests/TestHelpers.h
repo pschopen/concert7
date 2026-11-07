@@ -83,6 +83,58 @@ inline std::vector<const std::vector<float>*> chans (const std::array<std::vecto
     return { &ch[0], &ch[3] };
 }
 
+/** Energy of a third octave band of all channels, in 10 ms blocks. */
+inline std::vector<double> bandBlocks (const std::array<std::vector<float>, 4>& x, double sr, float fc)
+{
+    const int block = (int) (0.01 * sr);
+    std::vector<double> e;
+    for (auto& c : x)
+    {
+        juce::IIRFilter f1, f2;
+        f1.setCoefficients (juce::IIRCoefficients::makeBandPass (sr, fc, 4.3));
+        f2.setCoefficients (juce::IIRCoefficients::makeBandPass (sr, fc, 4.3));
+        e.resize (std::max (e.size(), c.size() / (size_t) block), 0.0);
+        for (size_t n = 0; n < c.size(); ++n)
+        {
+            const float v = f2.processSingleSampleRaw (f1.processSingleSampleRaw (c[n]));
+            if (n / (size_t) block < e.size()) e[n / (size_t) block] += (double) v * v;
+        }
+    }
+    return e;
+}
+
+/** How far a band's level (bandBlocks) lies above that of the recording stretched in time by factor, on average (dB):
+    0 for the same room with every decay factor times as long. Compared are the energies of a window that moves and
+    stretches along (150 ms of the recording, factor times that of the result), from 0.3 s on, as long as the window
+    lies inside the recording and 50 dB above its end. The recordings of short presets end while the bass still
+    rings, so a decay to the end of the file would not do. */
+inline float aboveStretchedDb (const std::vector<double>& result, const std::vector<double>& recording, float factor)
+{
+    const int window = 15;
+    auto sum = [] (const std::vector<double>& e, double from, double length) {
+        double s = 0.0;
+        for (int j = (int) from; j < (int) std::ceil (from + length) && j < (int) e.size(); ++j)
+        {
+            const double overlap = std::min ((double) j + 1.0, from + length) - std::max ((double) j, from);
+            if (overlap > 0.0) s += e[(size_t) j] * overlap;
+        }
+        return s;
+    };
+    const double peak = *std::max_element (recording.begin(), recording.end());
+    double above = 0.0;
+    int count = 0;
+    for (size_t j = 30; j < result.size(); ++j)
+    {
+        const double from = j / (double) factor;
+        if (from + window > (double) recording.size()) break;
+        const double own = sum (recording, from, window);
+        if (own < peak * window * 1e-5) break;
+        above += 10.0 * std::log10 ((sum (result, (double) j, window * factor) + 1e-30) / (own * factor));
+        ++count;
+    }
+    return count > 0 ? (float) (above / count) : 0.0f;
+}
+
 inline double energy (const std::vector<float>& x, int from = 0, int to = -1)
 {
     if (to < 0 || to > (int) x.size()) to = (int) x.size();

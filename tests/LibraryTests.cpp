@@ -5,6 +5,7 @@
 
 #include "TestHelpers.h"
 #include "dsp/IRLibrary.h"
+#include <map>
 #include <set>
 
 namespace concert7::test
@@ -133,6 +134,61 @@ public:
         }
         double sum = 0; for (auto t : loadTimes) sum += t;
         logMessage ("  average load + analysis time " + String (sum / std::max (1, loadTimes.size()), 1) + " ms");
+
+        beginTest ("every preset at its own decay is the recording itself");
+        for (auto& p : presets)
+        {
+            if (p.categoryOrder >= 100) continue;
+            String err;
+            auto src = loadSourceIR (p, 48000.0, err);
+            if (src == nullptr) continue;
+            DesignParams d;
+            d.decay = src->nativeRT;
+            auto ir = designIR (*src, nullptr, d);
+            float maxDiff = 0.0f;
+            for (size_t c = 0; c < 4; ++c)
+                for (size_t i = 0; i < std::max (ir->ch[c].size(), src->ch[c].size()); ++i)
+                    maxDiff = std::max (maxDiff, std::abs ((i < ir->ch[c].size() ? ir->ch[c][i] : 0.0f)
+                                                           - (i < src->ch[c].size() ? src->ch[c][i] : 0.0f)));
+            expectLessThan (maxDiff, 1e-6f, p.id);
+        }
+
+        beginTest ("DECAY changes the bass at most as much as the mids");
+        for (float factor : { 2.0f, 0.5f })
+        {
+            // per band: level against the recording stretched in time by factor, less that of 1 kHz
+            std::map<int, std::vector<float>> excess;
+            for (auto& p : presets)
+            {
+                if (p.categoryOrder >= 100) continue;
+                String err;
+                auto src = loadSourceIR (p, 48000.0, err);
+                if (src == nullptr) continue;
+                DesignParams d;
+                d.decay = jlimit (0.2f, 30.0f, src->nativeRT * factor);
+                const float f = d.decay / src->nativeRT;
+                auto ir = designIR (*src, nullptr, d);
+                auto above = [&] (float fc) { return aboveStretchedDb (bandBlocks (ir->ch, 48000.0, fc), bandBlocks (src->ch, 48000.0, fc), f); };
+                const float mids = above (1000.0f);
+                for (int fc : { 50, 63, 80, 100, 125, 160 })
+                {
+                    const float bass = above ((float) fc) - mids;
+                    excess[fc].push_back (bass);
+                    if (factor > 1.0f ? bass > 3.0f : bass < -3.0f)
+                        logMessage ("  x" + String (factor) + " " + p.id + ": " + String (fc) + " Hz " + String (bass, 1) + " dB");
+                }
+            }
+            String line ("  x" + String (factor) + ", bass against the mids (median / " + (factor > 1.0f ? "max" : "min") + "):");
+            for (auto& [fc, v] : excess)
+            {
+                std::sort (v.begin(), v.end());
+                const float median = v[v.size() / 2], extreme = factor > 1.0f ? v.back() : v.front();
+                line << " " << fc << " Hz " << String (median, 1) << " / " << String (extreme, 1);
+                if (factor > 1.0f) expectLessThan (median, 1.0f, String (fc) + " Hz grows more than DECAY");
+                else               expectGreaterThan (median, -1.0f, String (fc) + " Hz shrinks more than DECAY");
+            }
+            logMessage (line + " dB");
+        }
 
         beginTest ("decay control on every preset: reaches the target, no level jumps, finite output");
         const double sr = 48000.0;

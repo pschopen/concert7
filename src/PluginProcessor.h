@@ -114,6 +114,7 @@ public:
         juce::String userPresetName;   // a user preset is loaded
         bool userPresetModified = false;
         bool lowCpu = false, halfRate = false;   // as prepared
+        int decayMode = 0;                       // DecayMode
     };
     Status getStatus() const;
     std::shared_ptr<const BuiltIR> getCurrentIR() const { return engine.getActiveIR(); }

@@ -81,6 +81,7 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Undo / A/B | undo / redo of your edits (not of host automation), Cmd/Ctrl+Z; A/B with two complete settings, each with its own undo, both stored with the project |
 | Value entry | double-click a knob's value (or right-click it) to type a value, units optional (`2,5 s`, `250 ms`, `1.2k`, `off`); hosts' own text entry reads them too |
 | Decay | 0.2 – 30 s, starts at each preset's analysed native RT60 (optionally kept on preset change) |
+| Decay mode | right-click DECAY: Sabine (natural, default) – Proportional (brilliant) – Sabine, constant level – Stretch (room size); stays when presets change, shown in the display |
 | Pre-delay | 0 – 500 ms or tempo synced, applied to the late reverb |
 | Offset | −5 – +5 s (finer around 0), moves the start of the whole impulse response; negative values cut its beginning (negative pre-delay, thinner or no early reflections) |
 | Levels | Early, Late and VLF (late reverb below ~120 Hz) |
@@ -127,10 +128,22 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    target decay line, which keeps the recording's noise floor down. Where the recording ends or reaches its noise
    floor, the tail is continued with random-phase noise that starts on each bin's fitted decay line, keeps the
    measured coherence of the channels and follows the target decay – so a 1 s room can become a 20 s space.
-   As on the M7, the early reflections keep their level and the late reverb starts 0.55 dB lower per dB of reverb time
+   The early reflections keep their level and the late reverb starts 0.55 dB lower per dB of reverb time
    (LiquidSonics captures), so a longer decay is louder, its energy grows with RT^0.45.
-   The Bricasti presets' deep bass, which rings on in the Samplicity recordings far longer than on the M7, is taken
-   back to the reverb time of 125 – 160 Hz (`limitDeepBass`).
+   How Decay spreads over frequency is the **decay mode** (right-click DECAY). Nobody knows which the M7 itself does –
+   there are no recordings of one program at several decays – so the user chooses:
+   * *Sabine (natural)*, the default: only the wall part of the decay rate scales, air absorption (ISO 9613-1) stays,
+     so a longer decay keeps the highs shorter, like a larger hall.
+   * *Proportional (brilliant)*: every frequency scales by the same factor, as the M7's HF / LF RT MPY multiply its
+     reverb time. Long settings keep the brilliance of the highs (Large Hall at 7 s: 8 kHz 4.9 s instead of 3.1 s).
+   * *Sabine, constant level*: Sabine, and the whole response is scaled back to the preset's energy (500 Hz – 2 kHz,
+     measured on the result; roll-off and Smooth stay the user's), so turning Decay never changes the level.
+   * *Stretch (room size)*: the response is resampled by up to ×1.3 (×1/1.3 shorter): reflections, build-up and
+     colour move with it like in a larger or smaller room; Sabine does the rest of the way.
+   Below the mids no frequency changes its reverb time by more than Decay's own factor (Sabine would let the bass,
+   which has no air part, grow a little more), so the long deep bass of the Samplicity recordings grows with Decay,
+   not faster. A preset at its own decay is the recording itself, sample for sample: nothing changes before you
+   change something.
    `tools/decay_families.py` checks the result against the Large / Medium / Small families of the library.
    VLF and the late roll-off are applied as spectral gains. **Smooth** lowers bins that stick out of their
    third-octave neighbourhood (measured with the native decay removed, so long ringing counts as much as loud) and
@@ -254,17 +267,18 @@ tools/run_tests.sh /path/to/extracted/bricasti/irs   # macOS: build + tests + sn
 What the tests cover:
 
 * **DSP** – resampler accuracy and aliasing rejection, RT60 estimation on synthetic IRs with known decay,
-  per-band analysis, exact reproduction with neutral settings, decay scaling ×0.35 … ×3 and extension beyond the
-  recording, multi-band multipliers, pre-delay, levels, delay voices, roll-off, VLF, early pattern swap,
+  per-band analysis, exact reproduction with neutral settings (also with a long deep bass), decay scaling
+  ×0.35 … ×3 and extension beyond the recording, the bass changing with Decay no more than the mids, multi-band multipliers, pre-delay, levels, delay voices, roll-off, VLF, early pattern swap,
   true stereo convolution against direct convolution for block sizes 1 … 4096, click-free IR switching while
   audio runs, smooth (resonance and echo reduction at unchanged reverb time), EQ gains, modulator and ducker;
   modulation: early part + late reverb add up to the whole response, the late variant keeps envelope, spectrum and
   channel relation but not the fine structure, every stream is convolved with its own part, drift keeps the level,
   the chorus pitch movement stays small.
 * **Library** (real Bricasti files) – file name parsing, 134 presets in 6 categories, 32 distinct early patterns,
-  quad files identical to L/R pairs, every preset loads and analyses plausibly, the decay control works on real
-  presets.
-* **Processor** – synchronous load in `prepareToPlay`, processor impulse response equals the designed IR, preset
+  quad files identical to L/R pairs, every preset loads and analyses plausibly, every preset at its own decay is
+  the recording itself, the decay control works on real presets and changes their bass no more than the mids.
+* **Processor** – synchronous load in `prepareToPlay`, processor impulse response equals the designed IR, a preset
+  just chosen (also after changes) is the recording itself in the convolution and the display, preset
   change resets / holds decay, state save/restore across sample rates, random block sizes with extreme settings,
   tempo sync, offline rendering, mix 0 % bit transparency, mono input, editor creation.
 * **Plugin formats** – `auval -v aufx Cc7r Cnc7` validates the Audio Unit; `concert7-dev host` loads the installed

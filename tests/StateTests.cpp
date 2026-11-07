@@ -149,6 +149,19 @@ public:
             expectWithinAbsoluteError (get (proc, ParamID::mix), 30.0f, 0.01f);
         }
 
+        beginTest ("the decay mode stays when a preset is chosen, a state tree restores it");
+        {
+            proc.getShared().setKeptGroups (0);
+            set (proc, ParamID::decayMode, (float) DecayMode::Proportional);
+            auto tree = proc.createStateTree();
+            proc.selectPreset (proc.getPresetId(), true);
+            expectEquals (roundToInt (get (proc, ParamID::decayMode)), (int) DecayMode::Proportional);
+            set (proc, ParamID::decayMode, (float) DecayMode::Stretch);
+            proc.applyStateTree (tree);
+            expectEquals (roundToInt (get (proc, ParamID::decayMode)), (int) DecayMode::Proportional);
+            set (proc, ParamID::decayMode, (float) DecayMode::Sabine);
+        }
+
         beginTest ("kept groups: the old hold decay setting becomes the kept decay");
         {
             auto& settings = proc.getShared().getSettings();

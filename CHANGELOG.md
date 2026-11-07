@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Decay mode (right-click DECAY): how Decay changes the reverb – Sabine (natural, as before), Proportional
+  (brilliant: every frequency by the same factor, like the M7's own multipliers), Sabine with constant level (the
+  loudness of the preset at every decay) or Stretch (the response resampled by up to ×1.3, a larger or smaller room).
+  The choice stays when presets change and is shown in the display (PROP, CONST, STRETCH)
 - User presets: the whole sound (impulse response and every setting) in a `.c7preset` file. A preset browser
   (BROWSE or the display) shows library and user presets in one list with search, favourites, category and tag
   filters; a click or the arrow keys load a preset, `<` `>` step through the list as filtered. The category
@@ -41,11 +45,10 @@
 - The continued tail keeps the coherence of the channels as recorded (it was fully decorrelated). The M7
   recordings are almost decorrelated anyway; impulse responses of coincident or closely spaced microphones
   now keep their image
-- The deep bass of the Bricasti presets rings as long as on the M7: below 125 Hz the Samplicity recordings
-  ring on far longer than the M7 itself (at 50 Hz 1.56 times as long, median of 121 presets compared with the
-  LiquidSonics captures of the same programs, a tail of nearly fixed length). It is now taken back to the reverb
-  time of 125 - 160 Hz, as the M7 has it, at every Decay (62 - 99 Hz within 2 % of the captures). Your own
-  impulse responses are left as they are
+- A preset just loaded is the recording itself, sample for sample, and the display shows both curves on top of
+  each other: nothing changes before you change something (tested on every preset and through the plugin)
+- Decay changes the bass at most by its own factor: below the mids the reverb time no longer grows (or shrinks)
+  a little more than Decay, so the long deep bass of the Samplicity recordings grows with Decay, not faster
 - Decay changes the level as on the M7: the early reflections keep theirs, the late reverb starts a little lower
   the longer it rings (0.55 dB per dB of reverb time, as in the LiquidSonics captures of the M7). A longer decay
   is therefore louder, but less than its longer tail alone would make it: twice the decay about 2 - 3 dB, three

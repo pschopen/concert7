@@ -72,17 +72,29 @@ struct SourceIR
     std::array<std::vector<float>, 4> binPower;
     std::vector<std::complex<float>> binMix;
 
-    // Bricasti library only (limitDeepBass): > 0 is the reverb time the deep bass is taken back to, with per band
-    // the start (dB, same scale as bandLevelDb) of that shorter decay line
-    float deepBassRT = 0.0f;
-    std::vector<float> deepBassIntercept;
+    // DecayMode::Stretch: the last resampled copy of this response and its factor, kept by designIR for the next build
+    mutable std::shared_ptr<const SourceIR> stretched;
+    mutable float stretchedFactor = 0.0f;
 
     int length() const { return (int) ch[0].size(); }
 };
 
+/** How DECAY gets to its reverb time. Nobody knows which of them the M7 itself does (there are no recordings of one
+    program at several decays), so the user chooses.
+    Sabine: only the wall part of the decay rate scales, air absorption stays; the late reverb starts a little lower
+            the longer it rings (energy ~ RT^0.45, from the LiquidSonics captures).
+    Proportional: every frequency scales with the same factor (the M7's HF / LF RT MPY are multipliers of the reverb
+            time); level as Sabine. Long settings keep the brilliance of the highs.
+    ConstantLevel: Sabine, and the reverb keeps the loudness of the preset at every decay.
+    Stretch: the response is resampled up to kMaxStretch (a larger or smaller room: reflections, build-up and colour
+            move with it), Sabine does the rest. */
+enum class DecayMode { Sabine = 0, Proportional, ConstantLevel, Stretch };
+inline constexpr float kMaxStretch = 1.3f;
+
 struct DesignParams
 {
     float decay = 2.0f;          // target mid-band RT60 in seconds
+    DecayMode decayMode = DecayMode::Sabine;
     float predelayMs = 0.0f;     // extra delay of the late reverb
     float offsetMs = 0.0f;       // start of the whole response: > 0 later, < 0 earlier (the start is cut)
     float earlyDb = 0.0f;
@@ -139,18 +151,13 @@ struct BuiltIR
 /** Loads the files of a preset into a SourceIR at the given host rate. */
 std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate, juce::String& error);
 
-/** Builds a SourceIR from raw channels (used for user files and tests). */
+/** Builds a SourceIR from raw channels (used for user files and tests). Normalised to the same loudness for every
+    response, gainDb (energy) on top. */
 std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channels, bool trueStereo,
-                                        double sourceRate, double hostRate, const juce::String& name);
+                                        double sourceRate, double hostRate, const juce::String& name, float gainDb = 0.0f);
 
 /** Fills the analysis fields of a SourceIR. Called by loadSourceIR / makeSourceIR. */
 void analyseSourceIR (SourceIR& src);
-
-/** The Samplicity recordings ring on in the deep bass far longer than the M7 itself. In the LiquidSonics captures
-    of the same programs the M7 has the reverb time of 125 - 160 Hz all the way down; Samplicity has 1.56 times
-    that at 50 Hz (median of 121 presets), a tail of nearly fixed length. Sets up the SourceIR so that designIR
-    takes the deep bass back to that, at every DECAY. Called by loadSourceIR for the library presets. */
-void limitDeepBass (SourceIR& src);
 
 /** Windowed sinc resampler (offline, high quality). */
 std::vector<float> resample (const std::vector<float>& in, double srcRate, double dstRate);

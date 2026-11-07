@@ -44,7 +44,9 @@ namespace
             { ParamID::predelay, "Time before the late reverb starts. More pre-delay keeps vocals and instruments clear "
                                  "in front of the reverb; the early reflections stay where they are." },
             { ParamID::decay, "How long the reverb rings out (RT60). Starts at the preset's own decay. "
-                              "Set by the hall model while SPACE > ON is active." },
+                              "Set by the hall model while SPACE > ON is active. Right-click: how the decay is changed - "
+                              "Sabine (natural highs, the default), Proportional (brilliant, all frequencies alike), "
+                              "Sabine with constant level, or Stretch (a larger or smaller room)." },
             { ParamID::early, "Level of the early reflections - the first echoes that tell the ear how big the room is. "
                               "All the way down: off." },
             { ParamID::late, "Level of the late reverb, the dense tail. All the way down: off." },
@@ -380,6 +382,21 @@ Knob& MainPanel::addKnob (std::vector<std::unique_ptr<Knob>>& list, Component& p
     k->onExtendMenu = [this] (Knob& kn, PopupMenu& menu) {
         const auto group = groupOf (kn.getParamID());
         auto& sh = processor.getShared();
+        if (kn.getParamID() == ParamID::decayMode || kn.getParamID() == ParamID::decay)
+        {
+            // how DECAY gets to its reverb time (stays when presets change)
+            auto* mode = state.getParameter (ParamID::decayMode);
+            const int current = roundToInt (mode->convertFrom0to1 (mode->getValue()));
+            menu.addSeparator();
+            menu.addSectionHeader ("DECAY MODE");
+            const auto names = decayModeNames();
+            for (int i = 0; i < names.size(); ++i)
+                menu.addItem (names[i], true, i == current, [mode, i] {
+                    mode->beginChangeGesture();
+                    mode->setValueNotifyingHost (mode->convertTo0to1 ((float) i));
+                    mode->endChangeGesture();
+                });
+        }
         menu.addSeparator();
         menu.addItem ("Keep " + groupName (group).toLowerCase() + " when changing presets", true, sh.isKept (group),
                       [&sh, group] { sh.setKeptGroups (sh.getKeptGroups() ^ groupBit (group)); });

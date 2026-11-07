@@ -523,6 +523,7 @@ DesignParams Concert7Processor::readDesignParams() const
 {
     DesignParams d;
     d.decay = getEffectiveDecay();
+    d.decayMode = (DecayMode) jlimit (0, (int) DecayMode::Stretch, roundToInt (param (ParamID::decayMode)));
     d.predelayMs = getEffectivePredelayMs();
     d.offsetMs = param (ParamID::irOffset);
     d.earlyDb = param (ParamID::early);
@@ -973,7 +974,7 @@ void Concert7Processor::copyToOtherABSlot()
 void Concert7Processor::resetParameters()
 {
     // every control returns to its default unless its group is kept; DECAY follows the preset in the next
-    // build (or keeps the decay in effect, the hall's included, when it is kept)
+    // build (or keeps the decay in effect, the hall's included, when it is kept), the decay mode stays
     applyParameters (ValueTree (apvts.state.getType()), shared->getKeptGroups(), true);
 }
 
@@ -1003,7 +1004,9 @@ void Concert7Processor::applyParameters (const ValueTree& tree, GroupMask keep, 
         if (auto* rp = dynamic_cast<RangedAudioParameter*> (prm))
         {
             if ((keep & groupBit (groupOf (rp->paramID))) != 0) continue;
-            if ((skipDecay && rp->paramID == ParamID::decay) || (keepMix && rp->paramID == ParamID::mix)) continue;
+            // the decay mode is a way of working, not part of a preset's sound: it stays when presets change
+            if ((skipDecay && (rp->paramID == ParamID::decay || rp->paramID == ParamID::decayMode))
+                || (keepMix && rp->paramID == ParamID::mix)) continue;
             const auto child = tree.getChildWithProperty ("id", rp->paramID);
             float value = child.isValid() ? rp->convertTo0to1 ((float) child.getProperty ("value"))
                                           : rp->getDefaultValue();
@@ -1048,6 +1051,7 @@ Concert7Processor::Status Concert7Processor::getStatus() const
     s.userPresetName = userPresetName;
     s.lowCpu = lowCpuActive.load();
     s.halfRate = underSamplingActive.load();
+    s.decayMode = roundToInt (param (ParamID::decayMode));
     if (userPresetName.isNotEmpty() && ! userPresetValues.empty())
     {
         s.userPresetModified = presetId != userPresetIR;

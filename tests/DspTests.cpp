@@ -322,40 +322,62 @@ public:
             expectWithinAbsoluteError (cross, 0.64, 0.12);
         }
 
-        beginTest ("the overlong deep bass of the Bricasti library is taken back to the M7's");
+        beginTest ("a long deep bass stays as recorded, DECAY changes it at most by its own factor");
         {
-            // a 1.2 s reverb plus a softer 3 s tail below about 60 Hz that takes over later (like the Samplicity recordings)
-            auto ch = syntheticIR (1.2f, 3.5f, sr, 61);
-            auto tail = syntheticIR (3.0f, 3.5f, sr, 62);
-            const float a = (float) std::exp (-2.0 * MathConstants<double>::pi * 60.0 / sr);
-            for (size_t c = 0; c < 4; ++c)
-            {
-                for (int pass = 0; pass < 6; ++pass) // one pole low pass, 6 times
+            // a 1.2 s reverb plus a softer 3 s tail below about 60 Hz that takes over later (like the Samplicity
+            // recordings); times x gives the same room with every decay x times as long
+            auto longBassIR = [&] (float x) {
+                auto ch = syntheticIR (1.2f * x, 3.5f * x, sr, 61);
+                auto tail = syntheticIR (3.0f * x, 3.5f * x, sr, 62);
+                const float a = (float) std::exp (-2.0 * MathConstants<double>::pi * 60.0 / sr);
+                for (size_t c = 0; c < 4; ++c)
                 {
-                    float z = 0.0f;
-                    for (auto& v : tail[c]) v = z = (1.0f - a) * v + a * z;
+                    for (int pass = 0; pass < 6; ++pass) // one pole low pass, 6 times
+                    {
+                        float z = 0.0f;
+                        for (auto& v : tail[c]) v = z = (1.0f - a) * v + a * z;
+                    }
+                    for (size_t i = 0; i < ch[c].size(); ++i) ch[c][i] += 1.5f * tail[c][i];
                 }
-                for (size_t i = 0; i < ch[c].size(); ++i) ch[c][i] += 1.5f * tail[c][i];
-            }
-            auto user = makeSourceIR (ch, true, sr, sr, "long bass");
-            auto library = makeSourceIR (ch, true, sr, sr, "long bass");
-            limitDeepBass (*library);
+                return ch;
+            };
+            auto ch = longBassIR (1.0f);
+            auto longBass = makeSourceIR (std::move (ch), true, sr, sr, "long bass");
 
             DesignParams p;
-            p.decay = user->nativeRT;
-            auto plain = designIR (*user, nullptr, p);
-            auto limited = designIR (*library, nullptr, p);
-            const float bass = rtOf (*plain, 40.0f, 90.0f), bassLimited = rtOf (*limited, 40.0f, 90.0f);
-            const float ref = rtOf (*limited, 125.0f, 160.0f);
-            logMessage ("  40 - 90 Hz: " + String (bass, 2) + " s, limited " + String (bassLimited, 2) + " s, 125 - 160 Hz "
-                        + String (ref, 2) + " s");
-            // the source has the long bass, the library preset not any more. The limit line leaves up to 3 dB above
-            // it, which this energy decay measure counts more than the band analysis does (there: 62 - 99 Hz of the
-            // library within 2 % of the LiquidSonics captures)
-            expectGreaterThan (bass, ref * 1.4f);
-            expectLessThan (bassLimited, bass * 0.65f);
-            expectWithinAbsoluteError (bassLimited, ref, ref * 0.3f);
-            expectEquals (plain->length(), user->length());              // a user IR at its own decay stays as it is
+            p.decay = longBass->nativeRT;
+            auto native = designIR (*longBass, nullptr, p);
+            expectEquals (native->length(), longBass->length());
+            float maxDiff = 0.0f;
+            for (size_t c = 0; c < 4; ++c)
+                for (int i = 0; i < longBass->length(); ++i)
+                    maxDiff = std::max (maxDiff, std::abs (native->ch[c][(size_t) i] - longBass->ch[c][(size_t) i]));
+            expectLessThan (maxDiff, 1e-6f, "at its own decay the recording itself");
+
+            for (float factor : { 2.0f, 3.0f, 0.5f })
+            {
+                p.decay = longBass->nativeRT * factor;
+                auto ir = designIR (*longBass, nullptr, p);
+                // the reverb time below the mids changes by DECAY's factor at most
+                for (size_t b = 0; b < ir->rtFreqs.size() && ir->rtFreqs[b] < 250.0f; ++b)
+                {
+                    const float change = ir->rtTarget[b] / ir->rtNative[b];
+                    if (factor > 1.0f) expectLessThan (change, factor * 1.001f, String (ir->rtFreqs[b]) + " Hz target");
+                    else               expectGreaterThan (change, factor * 0.999f, String (ir->rtFreqs[b]) + " Hz target");
+                }
+                // rendered: the level against the recording stretched in time by factor; the mids are what DECAY sets
+                auto above = [&] (float fc) { return aboveStretchedDb (bandBlocks (ir->ch, sr, fc), bandBlocks (longBass->ch, sr, fc), factor); };
+                const float mids = above (1000.0f);
+                String line ("  x" + String (factor) + ", level against the recording stretched as much, 1 kHz " + String (mids, 1) + " dB, bass:");
+                for (float fc : { 50.0f, 63.0f, 80.0f, 100.0f, 125.0f, 160.0f })
+                {
+                    const float bass = above (fc) - mids;
+                    line << " " << String (fc, 0) << " Hz " << String (bass, 1);
+                    if (factor > 1.0f) expectLessThan (bass, 3.5f, String (fc) + " Hz grows more than DECAY");
+                    else               expectGreaterThan (bass, -3.5f, String (fc) + " Hz shrinks more than DECAY");
+                }
+                logMessage (line + " dB");
+            }
         }
 
         beginTest ("as on the M7, a longer decay is louder, its late reverb starts a little lower");
@@ -393,6 +415,72 @@ public:
                 expectWithinAbsoluteError (start, expected, 0.75f);
                 if (factor > 1.0f) expectGreaterThan (level, 1.0f); else expectLessThan (level, -1.0f);
             }
+        }
+
+        beginTest ("decay mode proportional: the highs scale like the mids");
+        {
+            auto hall = makeSourceIR (twoBandIR (2.0f, 1.0f, 3.0f, sr), true, sr, sr, "hall");
+            DesignParams p;
+            p.decay = hall->nativeRT;
+            p.decayMode = DecayMode::Proportional;
+            const float nativeHi = rtOf (*designIR (*hall, nullptr, p), 6000.0f, 12000.0f);
+            for (float factor : { 3.0f, 0.4f })
+            {
+                p.decay = hall->nativeRT * factor;
+                const float hi = rtOf (*designIR (*hall, nullptr, p), 6000.0f, 12000.0f);
+                logMessage ("  x" + String (factor) + ": highs " + String (hi, 3) + " s, proportional " + String (nativeHi * factor, 3) + " s");
+                expectWithinAbsoluteError (hi, nativeHi * factor, nativeHi * factor * 0.15f);
+            }
+        }
+
+        beginTest ("decay mode constant level: every decay keeps the loudness of the preset");
+        {
+            DesignParams p;
+            p.decayMode = DecayMode::ConstantLevel;
+            const float nativeLevel = bandEnergyDb (src->ch[0], sr, 500.0f, 2000.0f, 0);
+            for (float factor : { 3.0f, 0.4f })
+            {
+                p.decay = src->nativeRT * factor;
+                p.lateRolloffHz = 22000.0f;
+                auto ir = designIR (*src, nullptr, p);
+                const float rt = rtOf (*ir);
+                const float level = bandEnergyDb (ir->ch[0], sr, 500.0f, 2000.0f, 0) - nativeLevel;
+                // the roll-off stays the user's: with it the level is lower by about as much as it takes away
+                p.lateRolloffHz = 1500.0f;
+                const float darker = bandEnergyDb (designIR (*src, nullptr, p)->ch[0], sr, 500.0f, 2000.0f, 0) - nativeLevel;
+                logMessage ("  x" + String (factor) + ": RT " + String (rt, 2) + " s (target " + String (p.decay, 2) + "), level "
+                            + String (level, 2) + " dB, with a 1.5 kHz roll-off " + String (darker, 2) + " dB");
+                expectWithinAbsoluteError (rt, p.decay, p.decay * 0.1f);
+                expectWithinAbsoluteError (level, 0.0f, 0.5f);
+                // (a short decay is mostly early reflections, which the late roll-off leaves alone)
+                expectLessThan (darker, level - (factor > 1.0f ? 1.0f : 0.2f));
+            }
+        }
+
+        beginTest ("decay mode stretch: a larger room up to x1.3, the rest like Sabine");
+        {
+            DesignParams p;
+            p.decayMode = DecayMode::Stretch;
+            for (float factor : { 1.3f, 2.5f, 0.6f })
+            {
+                p.decay = src->nativeRT * factor;
+                auto ir = designIR (*src, nullptr, p);
+                const float rt = rtOf (*ir);
+                const float stretch = jlimit (1.0f / kMaxStretch, kMaxStretch, factor);
+                const float onsetRatio = ir->onsetMs / (float) (1000.0 * src->onset / sr);
+                logMessage ("  x" + String (factor) + ": RT " + String (rt, 2) + " s (target " + String (p.decay, 2)
+                            + "), first reflection x" + String (onsetRatio, 2) + " (stretch x" + String (stretch, 2) + ")");
+                expectWithinAbsoluteError (rt, p.decay, p.decay * 0.1f);
+                expectWithinAbsoluteError (onsetRatio, stretch, 0.1f);
+                expectEquals (ir->nativeRT, src->nativeRT); // the display compares with the preset itself
+            }
+            // a knob that moves a little reuses the stretched copy
+            p.decay = src->nativeRT * 1.3f;
+            designIR (*src, nullptr, p);
+            const auto* copy = src->stretched.get();
+            p.decay = src->nativeRT * 1.3005f;
+            designIR (*src, nullptr, p);
+            expect (copy != nullptr && src->stretched.get() == copy);
         }
 
         beginTest ("multi-band decay multipliers");

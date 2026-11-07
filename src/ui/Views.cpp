@@ -83,6 +83,9 @@ void PresetDisplay::paint (Graphics& g)
         // CPU modes: low CPU (latency), convolution at half the rate
         if (status.lowCpu || status.halfRate)
             info = String (status.lowCpu ? "ECO " : "") + (status.halfRate ? "1/2 " : "") + info;
+        // a decay mode other than the default
+        if (const auto tag = decayModeTag (status.decayMode); tag.isNotEmpty())
+            info = tag + " " + info;
     }
 
     // the first line gives way to the information on its right

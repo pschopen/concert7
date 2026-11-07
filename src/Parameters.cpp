@@ -173,6 +173,17 @@ namespace
     }
 }
 
+StringArray decayModeNames()
+{
+    return { "Sabine (natural)", "Proportional (brilliant)", "Sabine, constant level", "Stretch (room size)" };
+}
+
+String decayModeTag (int mode)
+{
+    static const char* tags[] = { "", "PROP", "CONST", "STRETCH" };
+    return isPositiveAndBelow (mode, (int) std::size (tags)) ? String (tags[mode]) : String();
+}
+
 bool isValueText (const String& text)
 {
     const auto s = text.trim().toLowerCase();
@@ -214,6 +225,9 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (floatParam (ParamID::irOffset, "IR Offset", NormalisableRange<float> (-kMaxOffsetMs, kMaxOffsetMs, 0.0f, 0.4f, true), 0.0f, "ms",
                             [] (float v, int) { return formatOffsetMs (v); }, msIn));
     layout.add (floatParam (ParamID::decay, "Decay", skewedRange (0.2f, 30.0f, 3.0f), 2.0f, "s", sec, secIn));
+    // how DECAY gets to its reverb time (DecayMode), from the right-click menu of DECAY
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamID::decayMode, 1 }, "Decay Mode", decayModeNames(), 0,
+                                                        AudioParameterChoiceAttributes().withAutomatable (false)));
     layout.add (floatParam (ParamID::early, "Early", NormalisableRange<float> (kLevelOffDb, 6.0f, 0.0f), 0.0f, "dB",
                             [] (float v, int) { return formatDb (v, kLevelOffDb); }, offIn (kLevelOffDb)));
     layout.add (floatParam (ParamID::late, "Late", NormalisableRange<float> (kLevelOffDb, 6.0f, 0.0f), 0.0f, "dB",
@@ -307,7 +321,7 @@ ParamGroup groupOf (const String& id)
 {
     using G = ParamGroup;
     static const std::map<String, G> groups {
-        { ParamID::decay, G::Decay },
+        { ParamID::decay, G::Decay }, { ParamID::decayMode, G::Decay },
         { ParamID::predelay, G::Predelay }, { ParamID::predelaySync, G::Predelay }, { ParamID::predelayNote, G::Predelay },
         { ParamID::irOffset, G::Predelay },
         { ParamID::early, G::Levels }, { ParamID::late, G::Levels }, { ParamID::vlf, G::Levels },
@@ -355,7 +369,7 @@ bool isIRParameter (const String& id)
 {
     static const StringArray irParams {
         ParamID::predelay, ParamID::predelaySync, ParamID::predelayNote, ParamID::irOffset, ParamID::decay,
-        ParamID::early, ParamID::late, ParamID::vlf, ParamID::erRolloff, ParamID::lateRolloff,
+        ParamID::decayMode, ParamID::early, ParamID::late, ParamID::vlf, ParamID::erRolloff, ParamID::lateRolloff,
         ParamID::erPattern, ParamID::delayTime, ParamID::delaySync, ParamID::delayNote,
         ParamID::delayLevel, ParamID::lowFreq, ParamID::lowMult, ParamID::highFreq, ParamID::highMult,
         ParamID::smooth, ParamID::hallOn, ParamID::hallVolume, ParamID::hallAbsorption
