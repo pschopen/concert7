@@ -19,6 +19,8 @@
 - Half rate convolution at 88.2 kHz and above (SETUP, per instance): about a third of the CPU at 96 kHz, same
   level and timing
 - The convolution pauses while the input is silent for longer than the reverb
+- The reverb has the same level at every sample rate: at 88.2 kHz and above it was 3 dB louder than at
+  44.1 / 48 kHz (the impulse responses were normalised per sample, not per second)
 - Decay follows room acoustics: it no longer scales every band by the same factor, only the part of the decay
   the walls give. Air absorption is the same in any room, so a longer Decay keeps the highs shorter, like a
   larger hall (Large Hall at 7 s: 8 kHz 3.0 s instead of 4.9 s, the lows a little longer), and a shorter Decay

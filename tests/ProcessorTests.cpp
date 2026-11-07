@@ -699,6 +699,20 @@ public:
             expectGreaterThan (db, 80.0);
         }
 
+        beginTest ("the reverb has the same level at 48 and 96 kHz");
+        for (const char* name : { "Plates/01 Bright Plate", "Halls/01 Large Hall" })
+        {
+            auto at48 = make (48000.0, false, false, name);
+            auto at96 = make (96000.0, false, false, name);
+            // the same frequency response: the sum of squares of an impulse response falls with the rate
+            const auto a = impulse (*at48, 3 * 48000, 128);
+            const auto b = impulse (*at96, 3 * 96000, 128);
+            const double levelDb = 10.0 * std::log10 ((energy (b, 0, b.getNumSamples()) * 96000.0)
+                                                      / (energy (a, 0, a.getNumSamples()) * 48000.0));
+            logMessage ("  " + String (name) + ": 96 kHz against 48 kHz " + String (levelDb, 2) + " dB");
+            expectWithinAbsoluteError (levelDb, 0.0, 0.3);
+        }
+
         beginTest ("under-sampling at 96 kHz: same level and timing, the same reverb in the audio band");
         {
             auto normal = make (96000.0, false, false, "Plates/01 Bright Plate");

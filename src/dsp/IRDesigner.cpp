@@ -22,7 +22,8 @@ namespace
     constexpr float kSplitFadeSeconds = 0.02f;
     constexpr float kOffsetFadeSeconds = 0.002f; // fade-in where a negative offset cuts the response
     constexpr float kVlfCrossoverHz   = 120.0f;
-    constexpr float kNormTargetPower  = 0.25f;  // white noise in -> -6 dB wet out
+    constexpr float kNormTargetPower  = 0.25f;  // white noise in -> -6 dB wet out (at kNormRate)
+    constexpr double kNormRate        = 48000.0; // the same frequency response at every host rate
     constexpr int   kCrossfadeFrames  = 4;      // measured -> synthesised tail
     constexpr float kMaxBoostDb       = 120.0f; // numeric guard only, the band cap does the real limiting
     constexpr float kLateFitStart     = 0.06f;  // RT is fitted on the late reverb, after the early reflections
@@ -905,11 +906,12 @@ std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channe
         src->ch[(size_t) idx[i]] = resample (c, sourceRate, hostRate);
     }
 
-    // equal loudness for all presets: average output power for white noise input
+    // equal loudness for all presets: average output power for white noise input. The sum of squares of the
+    // same response grows with the rate it is sampled at; scaled to kNormRate the level is the same at every rate.
     double power = 0.0;
     for (auto* c : activeChannels (src->ch, trueStereo))
         for (float v : *c) power += (double) v * v;
-    power *= 0.5;
+    power *= 0.5 * hostRate / kNormRate;
     if (power > 1e-20)
     {
         const float g = (float) std::sqrt (kNormTargetPower / power);

@@ -710,21 +710,13 @@ void Concert7Processor::buildNow()
         built = designIR (*source, patternSource.get(), dp);
         if (underSamplingActive.load())
         {
-            // halving and doubling the rate delays by HalfbandFilter::kDelay: start the response that much earlier.
-            // Responses are normalised to the same white noise power at the rate they are built for, which
-            // gives them 3 dB more in the audio band at twice the rate: keep the level of the full rate.
+            // halving and doubling the rate delays by HalfbandFilter::kDelay: start the response that much earlier
             auto trimmed = std::make_shared<BuiltIR> (*built);
             constexpr int cut = HalfbandFilter::kDelay / 2;
-            const float gain = std::sqrt (2.0f);
             for (auto* set : { &trimmed->ch, &trimmed->late, &trimmed->variant })
                 for (auto& c : *set)
                     if (! c.empty())
-                    {
                         c.erase (c.begin(), c.begin() + std::min ((int) c.size() - 1, cut));
-                        FloatVectorOperations::multiply (c.data(), gain, (int) c.size());
-                    }
-            trimmed->midEnergy *= 2.0f;
-            trimmed->midEnergyDiagonal *= 2.0f;
             built = trimmed;
         }
     }

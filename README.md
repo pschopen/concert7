@@ -111,8 +111,6 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 - Low CPU mode convolves in blocks of 4096 samples: average CPU is about half, but the block that completes a chunk
   carries its work. At very small buffers with long, modulated reverbs at 96 kHz, combine it with half rate
   convolution.
-- At 88.2 kHz and above the reverb is 3 dB louder than at 44.1 / 48 kHz (the impulse responses are normalised at the
-  host rate); half rate convolution keeps the level of the rate it runs at.
 - Tested by hand on macOS (REAPER 7, auval). Windows and Linux builds are compiled and unit tested by CI only.
 
 ## How it works
