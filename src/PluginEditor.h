@@ -39,6 +39,7 @@ private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void rebuildCategoryButtons();
+    void showCategoryMenu (const juce::String& category, juce::Component* target);
     void showSetupMenu();
     void touch (Knob& k);
     void editNextKnob (Knob& from, bool backwards);

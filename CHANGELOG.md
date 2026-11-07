@@ -3,14 +3,14 @@
 ## Unreleased
 
 - User presets: the whole sound (impulse response and every setting) in a `.c7preset` file. A preset browser
-  (BROWSE, the display or a category button) shows library and user presets in one list with search, favourites,
-  category and tag filters; a click or the arrow keys load a preset, `<` `>` step through the list as filtered.
-  The display shows a user preset's name and marks changes with `*`
+  (BROWSE or the display) shows library and user presets in one list with search, favourites, category and tag
+  filters; a click or the arrow keys load a preset, `<` `>` step through the list as filtered. The category
+  buttons still open the list of their presets. The display shows a user preset's name and marks changes with `*`
 - Keep groups of settings when changing presets (SETUP → Keep when changing presets, or a knob's right-click menu):
   decay, pre-delay, levels, mix, roll-off, multi-band, delay, modulation, ducker, EQ, space – or all of them, so
   only the impulse response changes. Replaces "Hold decay" (that setting carries over)
-- Undo / redo (buttons, Cmd/Ctrl+Z, Shift+Cmd+Z / Ctrl+Y) of your edits, not of host automation; a new preset
-  and the values it resets are one step
+- Undo / redo (buttons below the logo, Cmd/Ctrl+Z, Shift+Cmd+Z / Ctrl+Y) of your edits, not of host automation;
+  a new preset and the values it resets are one step
 - A/B comparison: two complete settings, each with its own undo, both stored with the project; switching back to
   a preset used just before skips loading and designing its impulse response
 - Type values: double-click a knob's value or use its new right-click menu (also: reset, keep, the host's menu);

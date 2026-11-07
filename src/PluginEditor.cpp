@@ -478,11 +478,38 @@ void MainPanel::rebuildCategoryButtons()
         b->getProperties().set ("led", true);
         b->getProperties().set ("fontHeight", 10.5f);
         b->setTooltip (categoryTooltip (c));
-        b->onClick = [this, c] { showBrowser (true, c); };
+        b->onClick = [this, c, ptr = b.get()] { showCategoryMenu (c, ptr); };
         addAndMakeVisible (*b);
         categoryButtons.push_back (std::move (b));
     }
     resized();
+}
+
+void MainPanel::showCategoryMenu (const String& category, Component* target)
+{
+    if (! processor.getShared().hasLibrary())
+    {
+        showWelcome (true);
+        return;
+    }
+    PopupMenu menu;
+    const auto current = processor.getPresetId();
+    processor.getShared().withLibrary ([&] (const IRLibrary& lib) {
+        const auto& presets = lib.getPresets();
+        for (size_t i = 0; i < presets.size(); ++i)
+        {
+            const auto& p = presets[i];
+            if (p.category == category)
+                menu.addItem ((int) i + 1, p.displayNumber() + "  " + p.name, true, p.id == current);
+        }
+    });
+    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (target).withMinimumWidth (220),
+                        [this, safe = SafePointer<MainPanel> (this)] (int result) {
+                            if (safe == nullptr) return;
+                            IRPreset p;
+                            if (result > 0 && processor.getShared().getPresetAt (result - 1, p))
+                                processor.selectPreset (p.id, true);
+                        });
 }
 
 void MainPanel::showBrowser (bool show, const String& category)
@@ -789,12 +816,12 @@ void MainPanel::paint (Graphics& g)
     // power LED
     const bool ok = processor.getShared().hasLibrary();
     g.setColour ((ok ? Colours::ledOn : Colours::warning).withAlpha (0.3f));
-    g.fillEllipse (39.0f, 131.0f, 12.0f, 12.0f);
+    g.fillEllipse (151.0f, 105.0f, 12.0f, 12.0f);
     g.setColour (ok ? Colours::ledOn : Colours::warning);
-    g.fillEllipse (42.0f, 134.0f, 6.0f, 6.0f);
+    g.fillEllipse (154.0f, 108.0f, 6.0f, 6.0f);
     g.setColour (Colours::textFaint);
     g.setFont (labelFont (9.0f));
-    g.drawText (ok ? "READY" : "NO IRS", 56, 131, 80, 12, Justification::left);
+    g.drawText (ok ? "READY" : "NO IRS", 168, 105, 80, 12, Justification::left);
 
     // main section
     drawGroup (g, mainArea.toFloat(), {});
@@ -900,6 +927,12 @@ void MainPanel::resized()
     prevButton.setBounds (gridX, 112, 44, 34);
     browseButton.setBounds (gridX + 50, 112, gridW - 100, 34);
     nextButton.setBounds (gridX + gridW - 44, 112, 44, 34);
+    // undo / redo and A/B below the logo
+    undoButton.setBounds (40, 122, 44, 26);
+    redoButton.setBounds (88, 122, 44, 26);
+    slotA.setBounds (142, 122, 34, 26);
+    slotB.setBounds (180, 122, 34, 26);
+    copySlot.setBounds (218, 122, 42, 26);
 
     // main knobs
     mainArea = { 12, kFaceHeight + 12, kWidth - 24, 208 };
@@ -926,13 +959,8 @@ void MainPanel::resized()
     // tabs
     const int tabY = mainArea.getBottom() + 10;
     for (int i = 0; i < kNumTabs; ++i)
-        tabButtons[(size_t) i].setBounds (12 + i * 116, tabY, 112, 28);
-    undoButton.setBounds (602, tabY, 52, 28);
-    redoButton.setBounds (658, tabY, 52, 28);
-    slotA.setBounds (724, tabY, 44, 28);
-    slotB.setBounds (772, tabY, 44, 28);
-    copySlot.setBounds (820, tabY, 52, 28);
-    setupButton.setBounds (kWidth - 12 - 104, tabY, 104, 28);
+        tabButtons[(size_t) i].setBounds (12 + i * 128, tabY, 124, 28);
+    setupButton.setBounds (kWidth - 12 - 110, tabY, 110, 28);
     pageArea = { 12, tabY + 32, kWidth - 24, kHeight - (tabY + 32) - 10 };
     for (auto& p : pages)
         p.setBounds (pageArea.reduced (8, 0).withTrimmedTop (2));
