@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- User presets: the whole sound (impulse response and every setting) in a `.c7preset` file. A preset browser
+  (BROWSE, the display or a category button) shows library and user presets in one list with search, favourites,
+  category and tag filters; a click or the arrow keys load a preset, `<` `>` step through the list as filtered.
+  The display shows a user preset's name and marks changes with `*`
+- Keep groups of settings when changing presets (SETUP → Keep when changing presets, or a knob's right-click menu):
+  decay, pre-delay, levels, mix, roll-off, multi-band, delay, modulation, ducker, EQ, space – or all of them, so
+  only the impulse response changes. Replaces "Hold decay" (that setting carries over)
+- Undo / redo (buttons, Cmd/Ctrl+Z, Shift+Cmd+Z / Ctrl+Y) of your edits, not of host automation; a new preset
+  and the values it resets are one step
+- A/B comparison: two complete settings, each with its own undo, both stored with the project; switching back to
+  a preset used just before skips loading and designing its impulse response
+- Type values: double-click a knob's value or use its new right-click menu (also: reset, keep, the host's menu);
+  units are optional and a decimal comma works. Hosts' own parameter entry reads the same texts
+- Low CPU mode (SETUP, per instance): about half the CPU at 4096 samples latency
+- Half rate convolution at 88.2 kHz and above (SETUP, per instance): about a third of the CPU at 96 kHz, same
+  level and timing
+- The convolution pauses while the input is silent for longer than the reverb
 - Decay follows room acoustics: it no longer scales every band by the same factor, only the part of the decay
   the walls give. Air absorption is the same in any room, so a longer Decay keeps the highs shorter, like a
   larger hall (Large Hall at 7 s: 8 kHz 3.0 s instead of 4.9 s, the lows a little longer), and a shorter Decay

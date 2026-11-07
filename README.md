@@ -61,6 +61,10 @@ Already unpacked the archive yourself? Choose that folder instead ("Already unpa
 screen is always available via SETUP → "Install impulse responses (ZIP)…". Concert7 uses the 44.1 kHz files at
 44.1/88.2/176.4 kHz and the 48 kHz files at 48/96/192 kHz; other rates are resampled once when a preset loads.
 
+**User presets** (BROWSE → SAVE AS...) store the whole sound – impulse response and every setting – as
+`.c7preset` files in the `Presets` folder next to the library folder (BROWSE → FOLDER). They can be copied between
+computers; one whose impulse response is missing loads with the first preset and says so.
+
 **Your own impulse responses:** every other WAV, AIFF or FLAC file in the IR folder (subfolders included) shows
 up in the *User* bank. Copy the files into the library folder and use SETUP → "Rescan library", or choose a
 folder of your own. A 4 channel file is used as true stereo (channel order LL, LR, RL, RR), a stereo file as
@@ -72,7 +76,11 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Area | Concert7 |
 | --- | --- |
 | Presets | the 134 Samplicity M7 captures (Halls, Plates, Rooms, Chambers, Ambience, Spaces) + your own IRs (mono, stereo or 4 channel true stereo) in the IR folder |
-| Decay | 0.2 – 30 s, starts at each preset's analysed native RT60 (optionally held on preset change) |
+| User presets | the whole sound (impulse response and every setting) in a `.c7preset` file; preset browser with search, favourites, categories and tags; tags for the library presets too |
+| Keep on preset change | eleven groups of settings (decay, pre-delay, levels, mix, roll-off, multi-band, delay, modulation, ducker, EQ, space) or all of them can be kept when another preset is chosen; padlocks on their knobs |
+| Undo / A/B | undo / redo of your edits (not of host automation), Cmd/Ctrl+Z; A/B with two complete settings, each with its own undo, both stored with the project |
+| Value entry | double-click a knob's value (or right-click it) to type a value, units optional (`2,5 s`, `250 ms`, `1.2k`, `off`); hosts' own text entry reads them too |
+| Decay | 0.2 – 30 s, starts at each preset's analysed native RT60 (optionally kept on preset change) |
 | Pre-delay | 0 – 500 ms or tempo synced, applied to the late reverb |
 | Offset | −5 – +5 s (finer around 0), moves the start of the whole impulse response; negative values cut its beginning (negative pre-delay, thinner or no early reflections) |
 | Levels | Early, Late and VLF (late reverb below ~120 Hz) |
@@ -88,7 +96,8 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Space | hall model: volume (m³) and absorption (stone church … studio) set the decay (Eyring); distance: places a dry source 0.5 – 60 m away – direct to reverberant ratio, presence, air absorption, gap before the first reflection, optional source width and time alignment (SPACE tab) |
 | Direct | tone (HIGHS shelf, AIR absorption), WIDTH and DELAY of the dry signal, REVERB GAP of the whole reverb against it – by hand or set by the distance mode (SPACE tab, below the distance controls) |
 | Interface | scalable UI (75 – 200 %), meters, dot matrix display with decay envelope, English / German setup screen |
-| Latency | zero (non-uniform partitioned convolution, tail on a background thread) |
+| Latency | zero (non-uniform partitioned convolution, tail on a background thread); 4096 samples in low CPU mode |
+| CPU | low CPU mode (about half the CPU, 4096 samples latency), half rate convolution at 88.2 kHz and above (a third at 96 kHz), the convolution pauses while the input is silent |
 
 ### Known limitations
 
@@ -98,7 +107,12 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 - Distance mode treats the input as the direct sound and the impulse response as everything the hall adds (true for
   the Bricasti library). Own impulse responses that contain a direct sound keep it. Use the mode as an insert on a dry
   source, not on an effect send.
-- Not (yet) implemented: surround/Atmos, a low CPU mode, user presets (settings are stored with the DAW project).
+- Not (yet) implemented: surround/Atmos.
+- Low CPU mode convolves in blocks of 4096 samples: average CPU is about half, but the block that completes a chunk
+  carries its work. At very small buffers with long, modulated reverbs at 96 kHz, combine it with half rate
+  convolution.
+- At 88.2 kHz and above the reverb is 3 dB louder than at 44.1 / 48 kHz (the impulse responses are normalised at the
+  host rate); half rate convolution keeps the level of the rate it runs at.
 - Tested by hand on macOS (REAPER 7, auval). Windows and Linux builds are compiled and unit tested by CI only.
 
 ## How it works

@@ -12,8 +12,8 @@ class EditHistory::Step : public UndoableAction
 {
 public:
     // the identities are snapshots without values: preset, user preset, distance reference
-    Step (EditHistory& h, std::vector<Change> c, Snapshot before, Snapshot after)
-        : history (h), changes (std::move (c)), identityBefore (std::move (before)), identityAfter (std::move (after)) {}
+    Step (EditHistory& h, std::vector<Change> c, Snapshot from, Snapshot to)
+        : history (h), changes (std::move (c)), identityBefore (std::move (from)), identityAfter (std::move (to)) {}
 
     bool perform() override
     {
