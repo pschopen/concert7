@@ -72,6 +72,11 @@ struct SourceIR
     std::array<std::vector<float>, 4> binPower;
     std::vector<std::complex<float>> binMix;
 
+    // Bricasti library only (limitDeepBass): > 0 is the reverb time the deep bass is taken back to, with per band
+    // the start (dB, same scale as bandLevelDb) of that shorter decay line
+    float deepBassRT = 0.0f;
+    std::vector<float> deepBassIntercept;
+
     int length() const { return (int) ch[0].size(); }
 };
 
@@ -140,6 +145,12 @@ std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channe
 
 /** Fills the analysis fields of a SourceIR. Called by loadSourceIR / makeSourceIR. */
 void analyseSourceIR (SourceIR& src);
+
+/** The Samplicity recordings ring on in the deep bass far longer than the M7 itself. In the LiquidSonics captures
+    of the same programs the M7 has the reverb time of 125 - 160 Hz all the way down; Samplicity has 1.56 times
+    that at 50 Hz (median of 121 presets), a tail of nearly fixed length. Sets up the SourceIR so that designIR
+    takes the deep bass back to that, at every DECAY. Called by loadSourceIR for the library presets. */
+void limitDeepBass (SourceIR& src);
 
 /** Windowed sinc resampler (offline, high quality). */
 std::vector<float> resample (const std::vector<float>& in, double srcRate, double dstRate);

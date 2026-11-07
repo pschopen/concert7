@@ -39,6 +39,10 @@ namespace
     constexpr float kBinFitStart      = 0.12f;  // decay of every bin: fitted from here on (after the early part)
     constexpr int   kMinBinFrames     = 6;
     constexpr float kBinRTRange       = 3.0f;   // a bin's reverb time stays within this factor of its band's
+    constexpr float kDeepBassFullHz   = 100.0f; // deep bass limit (limitDeepBass): in full below, fading out up to
+    constexpr float kDeepBassEndHz    = 125.0f;
+    constexpr float kDeepBassMarginDb = 3.0f;   // ... the band level may exceed its limited decay line by this
+    constexpr float kLateLevelSlope   = 0.55f;  // DECAY: the late reverb starts this many dB lower per dB of 10 log10 (RT ratio)
     constexpr double kCoherenceRidge  = 1e-3;
     constexpr int   kPhaseTableSize   = 4096;   // synthesised tail: random phases from a table
     constexpr float kVariantMatchSeconds = 0.01f; // late variant: block length of its energy match
@@ -261,6 +265,19 @@ namespace
             if (term < 1e-12 * sum) break;
         }
         return sum;
+    }
+
+    float deepBassWeight (float f)
+    {
+        return jlimit (0.0f, 1.0f, (kDeepBassEndHz - f) / (kDeepBassEndHz - kDeepBassFullHz));
+    }
+
+    /** A native reverb time with the deep bass limit of the Bricasti library applied (limitDeepBass). */
+    float limitedRT (const SourceIR& src, float rn, float f)
+    {
+        const float w = src.deepBassRT > 0.0f ? deepBassWeight (f) : 0.0f;
+        if (w <= 0.0f || rn <= src.deepBassRT) return rn;
+        return std::pow (rn, 1.0f - w) * std::pow (src.deepBassRT, w);
     }
 
     float decayMultiplier (float f, const DesignParams& p)
@@ -852,6 +869,34 @@ void analyseSourceIR (SourceIR& src)
     }
 }
 
+void limitDeepBass (SourceIR& src)
+{
+    if (src.bandFreq.empty()) return;
+    auto rtAt = [&] (float f) { return interpLogFreq (src.bandFreq, src.bandRT, f); };
+    src.deepBassRT = std::sqrt (rtAt (125.0f) * rtAt (160.0f));
+
+    // The limited decay line starts where the recording starts: the first part of the late reverb still follows the
+    // M7, the overlong tail comes later. Median over the first 30 dB of the limited decay.
+    const double frameSeconds = (double) (stftSizeFor (src.sampleRate) / 4) / src.sampleRate;
+    src.deepBassIntercept.assign (src.bandFreq.size(), 0.0f);
+    for (size_t b = 0; b < src.bandFreq.size(); ++b)
+    {
+        if (deepBassWeight (src.bandFreq[b]) <= 0.0f || b >= src.bandLevelDb.size()) continue;
+        const float rl = limitedRT (src, src.bandRT[b], src.bandFreq[b]);
+        const auto& level = src.bandLevelDb[b];
+        std::vector<float> icept;
+        for (size_t m = 0; m < level.size(); ++m)
+        {
+            const double tau = m * frameSeconds - src.onset / src.sampleRate;
+            if (tau >= kLateFitStart && tau <= kLateFitStart + 0.5 * rl)
+                icept.push_back (level[m] + (float) (60.0 * tau / rl));
+        }
+        if (icept.empty()) { src.deepBassIntercept[b] = src.bandIntercept[b]; continue; }
+        std::nth_element (icept.begin(), icept.begin() + (long) icept.size() / 2, icept.end());
+        src.deepBassIntercept[b] = icept[icept.size() / 2];
+    }
+}
+
 float estimateRT (const std::vector<const std::vector<float>*>& channels, double sr, float lowHz, float highHz)
 {
     if (channels.empty() || channels.front()->empty()) return NAN;
@@ -989,6 +1034,8 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
 
     auto src = makeSourceIR (std::move (ch), trueStereo, sr, hostRate, preset.name);
     src->presetId = preset.id;
+    if (preset.category != "User")
+        limitDeepBass (*src);
     return src;
 }
 
@@ -1027,9 +1074,12 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     const float scale = p.decay / std::max (0.01f, src.nativeRT);
     const DecayScaling decayScaling (src, p.decay);
     const bool vlfOff = p.vlfDb <= kVlfOffDb + 0.01f;
+    bool deepBassLimited = false; // the Bricasti library's deep bass is taken back at every DECAY, the native one too
+    for (size_t b = 0; b < src.bandFreq.size(); ++b)
+        deepBassLimited = deepBassLimited || limitedRT (src, src.bandRT[b], src.bandFreq[b]) < 0.995f * src.bandRT[b];
     const bool neutralLate = std::abs (scale - 1.0f) < 0.005f && std::abs (p.lowMult - 1.0f) < 0.005f
                           && std::abs (p.highMult - 1.0f) < 0.005f && p.vlfDb >= -0.05f
-                          && p.lateRolloffHz >= kRolloffBypassHz && p.smooth < 0.005f;
+                          && p.lateRolloffHz >= kRolloffBypassHz && p.smooth < 0.005f && ! deepBassLimited;
 
     Stft stft (stftSizeFor (sr));
     const int N = stft.N, hop = stft.hop, bins = stft.bins;
@@ -1042,39 +1092,24 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     {
         const float f = std::max (1.0f, (float) (k * sr / N));
         const float rn = perBin ? src.binRT[(size_t) k] : interpLogFreq (src.bandFreq, src.bandRT, f);
-        const float rt = jlimit (0.05f, 120.0f, decayScaling (rn, f) * decayMultiplier (f, p));
+        // the deep bass of the Bricasti library: its first part already decays like the M7, the overlong tail
+        // is cut by the limit line below (deepBassDb), so the slope starts from the limited reverb time
+        const float rl = limitedRT (src, rn, f);
+        const float rt = jlimit (0.05f, 120.0f, decayScaling (rl, f) * decayMultiplier (f, p));
         rtNat[(size_t) k] = rn;
         rtTgt[(size_t) k] = rt;
-        slopeDb[(size_t) k] = 60.0f * (1.0f / rn - 1.0f / rt);
+        slopeDb[(size_t) k] = 60.0f * (1.0f / rl - 1.0f / rt);
         shorter = shorter || (k > 0 && slopeDb[(size_t) k] < -0.01f);
     }
 
-    // The response keeps the energy (500 Hz - 2 kHz) it has at the native decay: DECAY changes how long it rings,
-    // not how loud it is (a longer decay starts softer, a shorter one louder). Early part and late reverb get the
-    // same gain, so the decay stays one line across the crossover. Per bin: the early part decays with the
-    // shorter of native and target decay (see below), the late reverb with the target.
-    float levelComp = 1.0f;
-    if (! neutralLate && perBin)
-    {
-        const double lateStart = splitSec + 0.5 * kSplitFadeSeconds;
-        auto energy = [&] (double rt, double from, double to) { // integral of 10^(-6 t / rt), without 1 / (6 ln 10)
-            return rt * (std::pow (10.0, -6.0 * from / rt) - (to < 0.0 ? 0.0 : std::pow (10.0, -6.0 * to / rt)));
-        };
-        double eNative = 0.0, eTarget = 0.0;
-        for (int k = 0; k < bins; ++k)
-        {
-            const float f = (float) (k * sr / N);
-            if (f < 500.0f || f > 2000.0f) continue;
-            double w = 0.0;
-            for (int c : chans)
-                if (! src.binPower[(size_t) c].empty()) w += src.binPower[(size_t) c][(size_t) k];
-            const double rn = rtNat[(size_t) k], rt = rtTgt[(size_t) k];
-            eNative += w * energy (rn, 0.0, -1.0);
-            eTarget += w * (energy (std::min (rn, rt), 0.0, lateStart) + energy (rt, lateStart, -1.0));
-        }
-        if (eNative > 0.0 && eTarget > 0.0)
-            levelComp = (float) std::sqrt (eNative / eTarget);
-    }
+    // DECAY and level, as on the M7: the early reflections (a block of their own) keep their level, the late reverb
+    // starts a little lower the longer it rings. In the LiquidSonics captures (both blocks at fixed levels) its start
+    // falls by kLateLevelSlope dB per dB of 10 log10 of the reverb time, so its energy grows with RT^0.45: twice the
+    // decay is 1.35 dB louder (a start that stays would be 3 dB, the same energy 0 dB). Across presets, where the
+    // size changes with the decay too, so it is an estimate. Inside the early part the change fades in from the first
+    // reflection to the crossover, the late reverb there starts together with the reflections.
+    const float lateLevelDb = neutralLate ? 0.0f : -kLateLevelSlope * 10.0f * std::log10 (std::max (0.01f, scale));
+    const int rampLength = std::max (1, splitA - src.onset);
 
     // ---- early part (own or from the selected pattern)
     std::array<std::vector<float>, 4> early;
@@ -1119,6 +1154,9 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
             for (int n = 0; n < el; ++n)
                 e[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
         }
+        if (std::abs (lateLevelDb) > 1e-3f)
+            for (int n = std::max (0, src.onset); n < (int) e.size(); ++n)
+                e[(size_t) n] *= Decibels::decibelsToGain (lateLevelDb * std::min (1.0f, (float) (n - src.onset) / (float) rampLength));
         lowPassInPlace (e, sr, p.erRolloffHz);
     }
 
@@ -1180,14 +1218,24 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
         }
         const int capFrames = numBands > 0 && ! src.bandLevelDb.empty() ? (int) src.bandLevelDb[0].size() : 0;
         std::vector<float> capDb ((size_t) capFrames * numBands, kMaxBoostDb);
+        // deep bass of the Bricasti library: per band and frame, the largest gain that keeps the level at most
+        // kDeepBassMarginDb above the limited decay line. Its overlong tail has nearly a fixed length, so changing the
+        // slope alone would leave most of it.
+        std::vector<float> deepBassDb (deepBassLimited ? (size_t) capFrames * numBands : 0, kMaxBoostDb);
         for (size_t b = 0; b < numBands && capFrames > 0; ++b)
         {
-            const float rtT = jlimit (0.05f, 120.0f, decayScaling (src.bandRT[b], src.bandFreq[b]) * decayMultiplier (src.bandFreq[b], p));
+            const float f = src.bandFreq[b];
+            const float rtT = jlimit (0.05f, 120.0f, decayScaling (limitedRT (src, src.bandRT[b], f), f) * decayMultiplier (f, p));
+            const float w = deepBassWeight (f);
+            const bool limitBand = ! deepBassDb.empty() && w > 0.0f && b < src.deepBassIntercept.size();
             for (int m = 0; m < capFrames; ++m)
             {
                 const float tau = std::max (0.0f, (float) ((m * hop - src.onset) / sr));
                 const float target = src.bandIntercept[b] - 60.0f * tau / rtT + kCapMarginDb;
                 capDb[(size_t) m * numBands + b] = target - src.bandLevelDb[b][(size_t) m];
+                if (limitBand) // fading out above kDeepBassFullHz: more room above the line
+                    deepBassDb[(size_t) m * numBands + b] = src.deepBassIntercept[b] - 60.0f * tau / rtT + kDeepBassMarginDb
+                                                            + (1.0f - w) * 12.0f - src.bandLevelDb[b][(size_t) m];
             }
         }
 
@@ -1222,6 +1270,8 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
                 // never lift the measured band level above the target decay line (noise floor, fades)
                 const float cap = capDb[i0] * (1.0f - bw.second) + capDb[i1] * bw.second;
                 db = std::min (db, std::max (cap, std::min (db, 0.0f)));
+                if (! deepBassDb.empty())
+                    db = std::min (db, deepBassDb[i0] * (1.0f - bw.second) + deepBassDb[i1] * bw.second);
             }
             return Decibels::decibelsToGain (db, -400.0f) * staticAmp[(size_t) k];
         };
@@ -1327,8 +1377,8 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     const bool delayOn = p.delayDb > kDelayOffDb + 0.01f;
     const int dd = (int) std::lround (p.delayMs * 0.001 * sr);
     const int voices = delayOn ? 3 : 0;
-    const float gE = p.earlyDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.earlyDb) * levelComp;
-    const float gL = p.lateDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.lateDb) * levelComp;
+    const float gE = p.earlyDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.earlyDb);
+    const float gL = p.lateDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.lateDb + lateLevelDb);
     const float gD = delayOn ? Decibels::decibelsToGain (p.delayDb) : 0.0f;
 
     const int lateLen = (int) late[(size_t) chans.front()].size();
@@ -1423,7 +1473,8 @@ std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern,
     out->rtNative = src.bandRT;
     out->rtTarget.resize (src.bandRT.size());
     for (size_t b = 0; b < src.bandRT.size(); ++b)
-        out->rtTarget[b] = jlimit (0.05f, 120.0f, decayScaling (src.bandRT[b], src.bandFreq[b]) * decayMultiplier (src.bandFreq[b], p));
+        out->rtTarget[b] = jlimit (0.05f, 120.0f, decayScaling (limitedRT (src, src.bandRT[b], src.bandFreq[b]), src.bandFreq[b])
+                                                  * decayMultiplier (src.bandFreq[b], p));
 
     // ---- modulation: early part, late reverb and its variant as responses of their own
     if (p.splitLate)

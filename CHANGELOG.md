@@ -41,9 +41,16 @@
 - The continued tail keeps the coherence of the channels as recorded (it was fully decorrelated). The M7
   recordings are almost decorrelated anyway; impulse responses of coincident or closely spaced microphones
   now keep their image
-- Decay no longer changes the loudness of the reverb, only how long it rings: a longer decay starts softer, a
-  shorter one louder, the response keeps its energy (before, three times the decay was about 7 dB louder, 0.4
-  times about 9 dB softer). Early reflections and tail get the same gain, so the decay stays one line
+- The deep bass of the Bricasti presets rings as long as on the M7: below 125 Hz the Samplicity recordings
+  ring on far longer than the M7 itself (at 50 Hz 1.56 times as long, median of 121 presets compared with the
+  LiquidSonics captures of the same programs, a tail of nearly fixed length). It is now taken back to the reverb
+  time of 125 - 160 Hz, as the M7 has it, at every Decay (62 - 99 Hz within 2 % of the captures). Your own
+  impulse responses are left as they are
+- Decay changes the level as on the M7: the early reflections keep theirs, the late reverb starts a little lower
+  the longer it rings (0.55 dB per dB of reverb time, as in the LiquidSonics captures of the M7). A longer decay
+  is therefore louder, but less than its longer tail alone would make it: twice the decay about 2 - 3 dB, three
+  times 3 - 4 dB, half of it 2 - 4 dB softer (before, the whole response kept its energy and the early
+  reflections moved by up to 4 dB)
 - `tools/decay_families.py` checks Decay against the Large / Medium / Small families of the Bricasti library
 - Modulation modes in the EXTRAS tab. An impulse response is a frozen snapshot, so the movement of the M7's own
   reverb is not in the recordings; the new modes add it back to the late reverb and leave the early reflections

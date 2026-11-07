@@ -241,14 +241,26 @@ public:
             expectLessThan (worst, 1.5);
             expectWithinAbsoluteError (k, -60.0 / p.decay, 60.0 / p.decay * 0.15);
 
-            // a longer decay leaves the early part as it is (apart from the level that keeps the energy)
+            // the first reflection (here the direct sound) keeps its level, a longer decay leaves the start of the early
+            // part as it is (its later part takes on the lower start of the late reverb)
+            auto peakDb = [&] (const BuiltIR& b) {
+                float pb = 0.0f, ps = 0.0f; // onset lies 1 ms before the first reflection
+                for (int i = src->onset; i < src->onset + (int) (0.003 * sr); ++i)
+                {
+                    pb = std::max (pb, std::abs (b.ch[0][(size_t) i]));
+                    ps = std::max (ps, std::abs (src->ch[0][(size_t) i]));
+                }
+                return Decibels::gainToDecibels (pb / ps);
+            };
+            logMessage ("  first reflection at x0.35: " + String (peakDb (*ir), 2) + " dB");
+            expectWithinAbsoluteError (peakDb (*ir), 0.0f, 1.0f);
             p.decay = src->nativeRT * 2.0f;
             auto longer = designIR (*src, nullptr, p);
             auto changeDb = [&] (double a, double b) {
                 const int from = src->onset + (int) (a * sr), to = src->onset + (int) (b * sr);
                 return 10.0 * std::log10 (energy (longer->ch[0], from, to) / energy (src->ch[0], from, to));
             };
-            expectWithinAbsoluteError (changeDb (0.0, 0.025), changeDb (0.025, 0.05), 0.1);
+            expectWithinAbsoluteError (changeDb (0.0, 0.005), 0.0, 0.15);
         }
 
         beginTest ("every frequency keeps its own decay: a ringing frequency is scaled, not stretched without limit");
@@ -310,17 +322,76 @@ public:
             expectWithinAbsoluteError (cross, 0.64, 0.12);
         }
 
-        beginTest ("the response keeps its energy when the decay changes");
+        beginTest ("the overlong deep bass of the Bricasti library is taken back to the M7's");
         {
-            auto levelDb = [&] (const std::vector<float>& x) { return bandEnergyDb (x, sr, 500.0f, 2000.0f, 0); };
-            const float native = levelDb (src->ch[0]);
+            // a 1.2 s reverb plus a softer 3 s tail below about 60 Hz that takes over later (like the Samplicity recordings)
+            auto ch = syntheticIR (1.2f, 3.5f, sr, 61);
+            auto tail = syntheticIR (3.0f, 3.5f, sr, 62);
+            const float a = (float) std::exp (-2.0 * MathConstants<double>::pi * 60.0 / sr);
+            for (size_t c = 0; c < 4; ++c)
+            {
+                for (int pass = 0; pass < 6; ++pass) // one pole low pass, 6 times
+                {
+                    float z = 0.0f;
+                    for (auto& v : tail[c]) v = z = (1.0f - a) * v + a * z;
+                }
+                for (size_t i = 0; i < ch[c].size(); ++i) ch[c][i] += 1.5f * tail[c][i];
+            }
+            auto user = makeSourceIR (ch, true, sr, sr, "long bass");
+            auto library = makeSourceIR (ch, true, sr, sr, "long bass");
+            limitDeepBass (*library);
+
+            DesignParams p;
+            p.decay = user->nativeRT;
+            auto plain = designIR (*user, nullptr, p);
+            auto limited = designIR (*library, nullptr, p);
+            const float bass = rtOf (*plain, 40.0f, 90.0f), bassLimited = rtOf (*limited, 40.0f, 90.0f);
+            const float ref = rtOf (*limited, 125.0f, 160.0f);
+            logMessage ("  40 - 90 Hz: " + String (bass, 2) + " s, limited " + String (bassLimited, 2) + " s, 125 - 160 Hz "
+                        + String (ref, 2) + " s");
+            // the source has the long bass, the library preset not any more. The limit line leaves up to 3 dB above
+            // it, which this energy decay measure counts more than the band analysis does (there: 62 - 99 Hz of the
+            // library within 2 % of the LiquidSonics captures)
+            expectGreaterThan (bass, ref * 1.4f);
+            expectLessThan (bassLimited, bass * 0.65f);
+            expectWithinAbsoluteError (bassLimited, ref, ref * 0.3f);
+            expectEquals (plain->length(), user->length());              // a user IR at its own decay stays as it is
+        }
+
+        beginTest ("as on the M7, a longer decay is louder, its late reverb starts a little lower");
+        {
+            // start of the late reverb's decay line: 10 ms blocks over its first 25 dB, fitted, at the onset
+            auto startDb = [&] (const BuiltIR& ir, float rt) {
+                const int block = (int) (0.01 * sr);
+                std::vector<double> t, db;
+                for (int a = src->onset + (int) (0.15 * sr); a + block <= src->onset + (int) ((0.15 + rt * 0.4) * sr); a += block)
+                {
+                    double e = 0.0;
+                    for (auto* c : chans (ir.ch)) e += energy (*c, a, a + block);
+                    t.push_back ((a + block / 2 - src->onset) / sr);
+                    db.push_back (10.0 * std::log10 (e / block + 1e-30));
+                }
+                double st = 0, sd = 0, stt = 0, std_ = 0;
+                const double n = (double) t.size();
+                for (size_t i = 0; i < t.size(); ++i) { st += t[i]; sd += db[i]; stt += t[i] * t[i]; std_ += t[i] * db[i]; }
+                const double k = (n * std_ - st * sd) / (n * stt - st * st);
+                return (float) ((sd - k * st) / n);
+            };
+            auto p = neutral;
+            const float native = startDb (*designIR (*src, nullptr, p), src->nativeRT);
+            const float nativeLevel = bandEnergyDb (src->ch[0], sr, 500.0f, 2000.0f, 0);
             for (float factor : { 3.0f, 0.4f })
             {
-                auto p = neutral;
                 p.decay = src->nativeRT * factor;
-                const float level = levelDb (designIR (*src, nullptr, p)->ch[0]) - native;
-                logMessage ("  x" + String (factor) + ": level " + String (level, 1) + " dB");
-                expectWithinAbsoluteError (level, 0.0f, 1.0f);
+                auto ir = designIR (*src, nullptr, p);
+                const float start = startDb (*ir, p.decay) - native;
+                const float level = bandEnergyDb (ir->ch[0], sr, 500.0f, 2000.0f, 0) - nativeLevel;
+                // 0.55 dB lower per dB of reverb time (LiquidSonics captures): the energy grows with RT^0.45
+                const float expected = -0.55f * 10.0f * std::log10 (factor);
+                logMessage ("  x" + String (factor) + ": late start " + String (start, 1) + " dB (expected " + String (expected, 1)
+                            + "), level " + String (level, 1) + " dB");
+                expectWithinAbsoluteError (start, expected, 0.75f);
+                if (factor > 1.0f) expectGreaterThan (level, 1.0f); else expectLessThan (level, -1.0f);
             }
         }
 

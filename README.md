@@ -127,7 +127,10 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    target decay line, which keeps the recording's noise floor down. Where the recording ends or reaches its noise
    floor, the tail is continued with random-phase noise that starts on each bin's fitted decay line, keeps the
    measured coherence of the channels and follows the target decay – so a 1 s room can become a 20 s space.
-   The whole response keeps the energy it has at the native decay: Decay changes how long it rings, not how loud.
+   As on the M7, the early reflections keep their level and the late reverb starts 0.55 dB lower per dB of reverb time
+   (LiquidSonics captures), so a longer decay is louder, its energy grows with RT^0.45.
+   The Bricasti presets' deep bass, which rings on in the Samplicity recordings far longer than on the M7, is taken
+   back to the reverb time of 125 – 160 Hz (`limitDeepBass`).
    `tools/decay_families.py` checks the result against the Large / Medium / Small families of the library.
    VLF and the late roll-off are applied as spectral gains. **Smooth** lowers bins that stick out of their
    third-octave neighbourhood (measured with the native decay removed, so long ringing counts as much as loud) and
