@@ -81,7 +81,7 @@ accepts the Samplicity archive, and the early patterns are always taken from the
 | Undo / A/B | undo / redo of your edits (not of host automation), Cmd/Ctrl+Z; A/B with two complete settings, each with its own undo, both stored with the project |
 | Value entry | double-click a knob's value (or right-click it) to type a value, units optional (`2,5 s`, `250 ms`, `1.2k`, `off`); hosts' own text entry reads them too |
 | Decay | 0.2 – 30 s, starts at each preset's analysed native RT60 (optionally kept on preset change) |
-| Decay mode | right-click DECAY: Sabine (natural, default) – Proportional (brilliant) – Sabine, constant level – Stretch (room size); stays when presets change, shown in the display |
+| Decay mode | right-click DECAY: Sabine (natural, default) – Proportional (brilliant) – Sabine, constant level – Stretch (room size) – Original (the mechanism of 0.1.0-beta); stays when presets change, shown in the display |
 | Pre-delay | 0 – 500 ms or tempo synced, applied to the late reverb |
 | Offset | −5 – +5 s (finer around 0), moves the start of the whole impulse response; negative values cut its beginning (negative pre-delay, thinner or no early reflections) |
 | Levels | Early, Late and VLF (late reverb below ~120 Hz) |
@@ -128,6 +128,8 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    target decay line, which keeps the recording's noise floor down. Where the recording ends or reaches its noise
    floor, the tail is continued with random-phase noise that starts on each bin's fitted decay line, keeps the
    measured coherence of the channels and follows the target decay – so a 1 s room can become a 20 s space.
+   The recording is used only as long as it follows its decay line (in the bass of the Bricasti recordings often
+   only half of it), and it crossfades into the continuation over 200 ms.
    The early reflections keep their level and the late reverb starts 0.55 dB lower per dB of reverb time
    (LiquidSonics captures), so a longer decay is louder, its energy grows with RT^0.45.
    How Decay spreads over frequency is the **decay mode** (right-click DECAY). Nobody knows which the M7 itself does –
@@ -140,6 +142,9 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
      measured on the result; roll-off and Smooth stay the user's), so turning Decay never changes the level.
    * *Stretch (room size)*: the response is resampled by up to ×1.3 (×1/1.3 shorter): reflections, build-up and
      colour move with it like in a larger or smaller room; Sabine does the rest of the way.
+   * *Original (0.1.0-beta)*: the first mechanism, for comparison, sample for sample as in 0.1.0-beta: one decay
+     per third octave scaled proportionally, the early reflections and the start of the late reverb as they are,
+     the continuation from the last frames' level (each channel its own noise, a 43 ms crossfade).
    Below the mids no frequency changes its reverb time by more than Decay's own factor (Sabine would let the bass,
    which has no air part, grow a little more), so the long deep bass of the Samplicity recordings grows with Decay,
    not faster. A preset at its own decay is the recording itself, sample for sample: nothing changes before you

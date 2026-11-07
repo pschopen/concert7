@@ -4,8 +4,18 @@
 
 - Decay mode (right-click DECAY): how Decay changes the reverb – Sabine (natural, as before), Proportional
   (brilliant: every frequency by the same factor, like the M7's own multipliers), Sabine with constant level (the
-  loudness of the preset at every decay) or Stretch (the response resampled by up to ×1.3, a larger or smaller room).
-  The choice stays when presets change and is shown in the display (PROP, CONST, STRETCH)
+  loudness of the preset at every decay), Stretch (the response resampled by up to ×1.3, a larger or smaller room)
+  or Original (the mechanism of 0.1.0-beta, sample for sample, for comparison). The choice stays when presets
+  change and is shown in the display (PROP, CONST, STRETCH, ORIG)
+- A longer Decay no longer sounds artificial, pumps or breaks where the recording ends: the random phases of the
+  continued tail were not random. Seeded per frame with numbers a fixed step apart, the generator gave phases that
+  advanced by the same step from frame to frame, a slightly detuned tone in every frequency instead of noise; the
+  overlapping frames added it up or cancelled it, so single frequencies came out up to 27 dB too loud or too soft,
+  and since the continuation starts at different times in different frequencies, the errors moved during the
+  decay (Large Hall at 7 s: 160 Hz fell by 16 dB at 3.3 s). The Drift modulation's variant had the same fault.
+  The seeds are hashed now; the continued tail matches ideal decaying noise band by band
+- The recording hands over to the continued tail where it leaves its decay line (up to half of its late range
+  earlier, before at most 0.5 s), with a 200 ms crossfade instead of 43 ms
 - User presets: the whole sound (impulse response and every setting) in a `.c7preset` file. A preset browser
   (BROWSE or the display) shows library and user presets in one list with search, favourites, category and tag
   filters; a click or the arrow keys load a preset, `<` `>` step through the list as filtered. The category

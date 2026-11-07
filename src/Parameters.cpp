@@ -175,12 +175,13 @@ namespace
 
 StringArray decayModeNames()
 {
-    return { "Sabine (natural)", "Proportional (brilliant)", "Sabine, constant level", "Stretch (room size)" };
+    return { "Sabine (natural)", "Proportional (brilliant)", "Sabine, constant level", "Stretch (room size)",
+             "Original (0.1.0-beta)" };
 }
 
 String decayModeTag (int mode)
 {
-    static const char* tags[] = { "", "PROP", "CONST", "STRETCH" };
+    static const char* tags[] = { "", "PROP", "CONST", "STRETCH", "ORIG" };
     return isPositiveAndBelow (mode, (int) std::size (tags)) ? String (tags[mode]) : String();
 }
 

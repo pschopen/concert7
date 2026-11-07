@@ -59,7 +59,8 @@ struct SourceIR
     float nativeRT = 1.0f;       // RT60 in the 500 Hz .. 2 kHz bands
     std::vector<float> bandFreq;
     std::vector<float> bandRT;
-    std::vector<float> bandValidEnd; // seconds after onset where each band hits its floor
+    std::vector<float> bandValidEnd; // seconds after onset where each band hits its floor (or leaves its decay line)
+    std::vector<float> bandValidEndRecorded; // ... where it hits its floor only (DecayMode::Original)
     std::vector<float> bandIntercept;  // dB at the onset of the fitted decay line (same scale as bandLevelDb)
     std::vector<std::vector<float>> bandLevelDb; // smoothed band level per STFT frame (sum of channels)
     std::vector<float> binColourDb;  // late reverb level of each STFT bin relative to its third-octave neighbourhood
@@ -87,8 +88,11 @@ struct SourceIR
             time); level as Sabine. Long settings keep the brilliance of the highs.
     ConstantLevel: Sabine, and the reverb keeps the loudness of the preset at every decay.
     Stretch: the response is resampled up to kMaxStretch (a larger or smaller room: reflections, build-up and colour
-            move with it), Sabine does the rest. */
-enum class DecayMode { Sabine = 0, Proportional, ConstantLevel, Stretch };
+            move with it), Sabine does the rest.
+    Original: the mechanism of 0.1.0-beta, for comparison: one decay per third octave scaled proportionally, the
+            early reflections and the start of the late reverb as they are, the continuation from the level of the
+            last frames of the recording (each channel its own noise, a short crossfade). */
+enum class DecayMode { Sabine = 0, Proportional, ConstantLevel, Stretch, Original };
 inline constexpr float kMaxStretch = 1.3f;
 
 struct DesignParams

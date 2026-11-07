@@ -153,6 +153,44 @@ public:
             for (auto& c : ir->ch) for (float v : c) if (! std::isfinite (v)) { expect (false, "non finite sample"); break; }
         }
 
+        beginTest ("the synthesised tail is noise: every frequency at its level, none cancelled or ringing");
+        {
+            // white noise reverb cut at 0.8 s and taken to 5 s: from 1.5 s on the tail is synthesised. Per STFT bin
+            // (100 Hz - 4 kHz), its level over 1.5 - 3.5 s with the decay taken out is the same everywhere up to the
+            // spread of noise. Phases that only looked random (seeds a multiple of the frame apart) gave a coherent
+            // tone per bin instead, its frames added up or cancelled: a spread of 7.8 dB, single bins 27 dB off. The
+            // rest comes from the bins' decay lines, fitted on 0.8 s of noise.
+            auto shortSrc = makeSourceIR (syntheticIR (1.0f, 0.8f, sr, 4), true, sr, sr, "truncated");
+            DesignParams p;
+            p.decay = 5.0f;
+            auto ir = designIR (*shortSrc, nullptr, p);
+            const auto& y = ir->ch[0];
+            const int N = 2048, hop = 512;
+            std::vector<double> level (N / 2 + 1, 0.0);
+            int frames = 0;
+            for (int start = (int) (1.5 * sr); start + N <= (int) (3.5 * sr) && start + N <= (int) y.size(); start += hop, ++frames)
+            {
+                const double tau = (start + N / 2) / sr;
+                std::vector<float> buf (2 * (size_t) N, 0.0f);
+                for (int n = 0; n < N; ++n)
+                    buf[(size_t) n] = y[(size_t) (start + n)] * (float) (0.5 - 0.5 * std::cos (2.0 * MathConstants<double>::pi * n / N));
+                dsp::FFT fft (11);
+                fft.performFrequencyOnlyForwardTransform (buf.data());
+                for (int k = 0; k <= N / 2; ++k)
+                    level[(size_t) k] += (double) buf[(size_t) k] * buf[(size_t) k] * std::pow (10.0, 6.0 * tau / p.decay);
+            }
+            std::vector<double> db;
+            for (int k = (int) (100.0 * N / sr); k <= (int) (4000.0 * N / sr); ++k)
+                db.push_back (10.0 * std::log10 (level[(size_t) k] / frames + 1e-30));
+            const double mean = std::accumulate (db.begin(), db.end(), 0.0) / (double) db.size();
+            double var = 0.0, worst = 0.0;
+            for (double v : db) { var += (v - mean) * (v - mean); worst = std::max (worst, std::abs (v - mean)); }
+            const double spread = std::sqrt (var / (double) db.size());
+            logMessage ("  level per bin: spread " + String (spread, 2) + " dB, largest deviation " + String (worst, 2) + " dB");
+            expectLessThan (spread, 2.0);
+            expectLessThan (worst, 6.0);
+        }
+
         beginTest ("a recording that starts to fade out: the longer decay does not sink and swell");
         {
             // the last 0.3 s of the recording sit 3 dB below the decay line (the start of a fade-out)
@@ -431,6 +469,38 @@ public:
                 logMessage ("  x" + String (factor) + ": highs " + String (hi, 3) + " s, proportional " + String (nativeHi * factor, 3) + " s");
                 expectWithinAbsoluteError (hi, nativeHi * factor, nativeHi * factor * 0.15f);
             }
+        }
+
+        beginTest ("decay mode original: the mechanism of 0.1.0-beta");
+        {
+            // every band by the same factor
+            auto hall = makeSourceIR (twoBandIR (2.0f, 1.0f, 3.0f, sr), true, sr, sr, "hall");
+            DesignParams p;
+            p.decayMode = DecayMode::Original;
+            p.decay = hall->nativeRT;
+            const float nativeHi = rtOf (*designIR (*hall, nullptr, p), 6000.0f, 12000.0f);
+            p.decay = hall->nativeRT * 3.0f;
+            const float hi = rtOf (*designIR (*hall, nullptr, p), 6000.0f, 12000.0f);
+            expectWithinAbsoluteError (hi, nativeHi * 3.0f, nativeHi * 3.0f * 0.15f);
+
+            // the early part stays as it is when shortening; the late reverb's gain grows from the onset on (there
+            // was no level rule yet)
+            p.decay = src->nativeRT * 0.35f;
+            auto shorter = designIR (*src, nullptr, p);
+            auto changeDb = [&] (const BuiltIR& ir, double a, double b) {
+                const int from = src->onset + (int) (a * sr), to = src->onset + (int) (b * sr);
+                return 10.0 * std::log10 (energy (ir.ch[0], from, to) / energy (src->ch[0], from, to));
+            };
+            p.decay = src->nativeRT * 3.0f;
+            auto longer = designIR (*src, nullptr, p);
+            const float rt = rtOf (*longer);
+            logMessage ("  early part at x0.35 " + String (changeDb (*shorter, 0.0, 0.04), 2) + " dB, late start at x3 "
+                        + String (changeDb (*longer, 0.1, 0.15), 2) + " dB, RT x3 " + String (rt, 2) + " s (target "
+                        + String (p.decay, 2) + ")");
+            expectWithinAbsoluteError (changeDb (*shorter, 0.0, 0.04), 0.0, 0.2);
+            const double grown = 60.0 * 0.125 * (1.0 / src->nativeRT - 1.0 / p.decay);
+            expectWithinAbsoluteError (changeDb (*longer, 0.1, 0.15), grown, 1.0);
+            expectWithinAbsoluteError (rt, p.decay, p.decay * 0.1f);
         }
 
         beginTest ("decay mode constant level: every decay keeps the loudness of the preset");
