@@ -32,6 +32,14 @@ struct WetStreams
     }
 };
 
+/** Where the convolution is in the sequence of the takes (BuiltIR::earlyTakes, lateTakes): position in takes at the
+    first sample (take 0 at 0, take 1 at 1 ...; between them it fades), and its step per sample. */
+struct TakeClock
+{
+    double position = 0.0;
+    double increment = 0.0;
+};
+
 /** Four zero latency partitioned convolvers forming a true stereo reverb, per stream of the response. */
 class TrueStereoConvolver
 {
@@ -42,21 +50,35 @@ public:
     void load (std::shared_ptr<const BuiltIR> ir, size_t headBlock, size_t tailBlock);
     void unload();
 
-    /** Real-time safe. scratch must hold 4 * numSamples floats. */
+    static constexpr int kScratchPerSample = 10;
+
+    /** Real-time safe. scratch must hold kScratchPerSample * numSamples floats. With takes, the early part and the
+        late reverb come out as the mix of their takes at clock (take 0 without a clock; all takes are convolved). */
     void process (const float* inL, const float* inR, const WetStreams& out, int numSamples,
-                  bool crossfeed, float* scratch);
+                  bool crossfeed, float* scratch, const TakeClock* clock = nullptr);
 
     bool isLoaded() const { return loaded; }
     bool isTrueStereo() const { return trueStereo; }
+    bool hasTakes() const { return numEarlyTakes > 0 || numLateTakes > 0; }
     std::shared_ptr<const BuiltIR> getIR() const { return ir; }
 
 private:
     using Set = std::array<std::unique_ptr<Convolver>, 4>;
+    void loadSet (Set& set, const std::array<std::vector<float>, 4>& data, size_t headBlock, size_t tailBlock);
     void processSet (Set& set, const float* inL, const float* inR, float* outL, float* outR, int n,
                      bool crossfeed, float* scratch);
+    /** Convolves the other takes and mixes them with take 0 (in outL / outR) at clock. */
+    void processTakes (std::vector<Set>& takes, int numTakes, const std::vector<float>& rho, const float* inL,
+                       const float* inR, float* outL, float* outR, int n, bool crossfeed, float* scratch,
+                       const TakeClock* clock);
 
     std::array<Set, WetStreams::kNumStreams> sets;   // late and variant are created when first needed
     std::array<bool, WetStreams::kNumStreams> used {};
+    // the other takes (BuiltIR::earlyTakes, lateTakes): the first numEarlyTakes / numLateTakes sets are in use, the
+    // others are kept for the next response (every convolver has a thread of its own)
+    std::vector<Set> earlyTakes, lateTakes;
+    int numEarlyTakes = 0, numLateTakes = 0;
+    std::vector<float> earlyRho, lateRho;
     std::shared_ptr<const BuiltIR> ir;
     bool loaded = false;
     bool trueStereo = false;
@@ -84,8 +106,10 @@ public:
         Returns false if it gave up (e.g. shouldAbort returned true). */
     bool loadIR (std::shared_ptr<const BuiltIR> ir, const std::function<bool()>& shouldAbort);
 
-    /** Audio thread. Inputs may alias each other. Outputs are overwritten. */
-    void process (const float* inL, const float* inR, const WetStreams& out, int numSamples, bool crossfeed);
+    /** Audio thread. Inputs may alias each other. Outputs are overwritten. takesPerSecond: how fast the convolution
+        moves through the takes of a response that has them (0: it stays). */
+    void process (const float* inL, const float* inR, const WetStreams& out, int numSamples, bool crossfeed,
+                  double takesPerSecond = 0.0);
 
     /** Audio thread: n samples of silent input, without convolving. The convolvers hold only silence by
         then (the input was silent for longer than the response), so they simply pause. Returns false while a
@@ -105,6 +129,7 @@ public:
     static constexpr double kCrossfadeSeconds = 0.08;
     static constexpr double kHistorySeconds   = 8.0;
     static constexpr double kWarmupSeconds    = 3.0;
+    static constexpr double kTakeCycle        = 840.0;  // the position in the takes wraps here (any number of takes up to 8 divides it)
 
 private:
     enum State { Idle, Preparing, Ready, Fading };
@@ -115,7 +140,7 @@ private:
         {
             l.assign ((size_t) n, 0.0f);
             r = l;
-            sc.assign ((size_t) n * 4, 0.0f);
+            sc.assign ((size_t) n * TrueStereoConvolver::kScratchPerSample, 0.0f);
             out.assign ((size_t) n * 2 * WetStreams::kNumStreams, 0.0f);
             for (size_t i = 0; i < streams.ch.size(); ++i)
                 streams.ch[i] = out.data() + i * (size_t) n;
@@ -142,6 +167,7 @@ private:
     int maxBlock = 512;
     size_t headBlock = 256, tailBlock = 8192;
     int crossfadeLength = 1, crossfadePos = 0;
+    double takePosition = 0.0;  // in the sequence of the takes, shared by both convolvers (audio thread)
 
     mutable juce::SpinLock irLock;
     std::shared_ptr<const BuiltIR> activeIR;

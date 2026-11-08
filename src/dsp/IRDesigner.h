@@ -28,6 +28,9 @@
 //     early part (so it can move on its own), together with a variant: the same
 //     late reverb with new random phases in every STFT frame - same envelope,
 //     spectrum and channel relation, but an independent fine structure.
+//  6. Split captures with several takes: the other takes of the early reflections and the late reverb are
+//     built like the first and handed over as responses of their own, the convolution moves through them
+//     (DesignParams::takes).
 
 #pragma once
 
@@ -63,6 +66,15 @@ struct SourceIR
     std::array<std::vector<float>, 4> lateTake;
     bool hasBlocks() const { return ! lateBlock[0].empty(); }
     bool hasLateTake() const { return ! lateTake[0].empty(); }
+
+    // split captures, the other takes (loaded on demand, see loadSourceTakes): early reflections that differ from
+    // the first take, late reverbs with a fine structure of their own. Same scale and length as the blocks.
+    std::vector<std::array<std::vector<float>, 4>> earlyTakes, lateTakes;
+    bool takesLoaded = false;
+    // how the blocks were made from the files: length at the file's rate (after trimming), that rate, the gain
+    double blockFileRate = 0.0;
+    size_t blockFileLength = 0;
+    float blockGain = 1.0f;
 
     // analysis results (of the late block where there is one)
     int onset = 0;               // first sample of the direct sound / first reflection
@@ -103,6 +115,9 @@ struct SourceIR
             early reflections and the start of the late reverb as they are, the continuation from the level of the
             last frames of the recording (each channel its own noise, a short crossfade). */
 enum class DecayMode { Sabine = 0, Proportional, ConstantLevel, Stretch, Original };
+
+/** Split captures with several takes: which parts move through their takes. */
+enum class TakeMode { Off = 0, Late, EarlyAndLate };
 inline constexpr float kMaxStretch = 1.3f;
 
 struct DesignParams
@@ -125,6 +140,9 @@ struct DesignParams
     float smooth = 0.0f;         // 0 .. 1: evens out resonances and envelope bumps of the late reverb
     bool splitLate = false;      // modulation: the late reverb as a response of its own (BuiltIR::late)
     bool lateVariant = false;    // modulation: plus its variant (BuiltIR::variant), needs splitLate
+    // split captures only:
+    TakeMode takes = TakeMode::Off; // the other takes as responses of their own (BuiltIR::earlyTakes, lateTakes), needs splitLate
+    float lateOffsetMs = 0.0f;   // moves the late block against the reflections: < 0 earlier, at most up to its first sound
 
     bool operator== (const DesignParams& o) const;
     bool operator!= (const DesignParams& o) const { return ! (*this == o); }
@@ -142,6 +160,12 @@ struct BuiltIR
     std::array<std::vector<float>, 4> late, variant;
     bool hasLate() const { return ! late[0].empty(); }
     bool hasVariant() const { return ! variant[0].empty(); }
+
+    // DesignParams::takes: the other takes of the early part (like ch) and of the late reverb (like late), and the
+    // correlation of neighbours in the sequence of all takes: takeRho[k] of take k with take k + 1, the last with
+    // the first (take 0 is ch / late)
+    std::vector<std::array<std::vector<float>, 4>> earlyTakes, lateTakes;
+    std::vector<float> earlyTakeRho, lateTakeRho;
 
     int length() const { return (int) std::max (ch[0].size(), late[0].size()); }
 
@@ -164,6 +188,10 @@ struct BuiltIR
 
 /** Loads the files of a preset into a SourceIR at the given host rate. */
 std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate, juce::String& error);
+
+/** Split captures: loads the other takes of a preset whose blocks src holds (once; true when there is nothing to
+    load). The takes are made like the blocks; a take that equals the first is left out. */
+bool loadSourceTakes (const IRPreset& preset, SourceIR& src, juce::String& error);
 
 /** Builds a SourceIR from raw channels (used for user files and tests). Normalised to the same loudness for every
     response, gainDb (energy) on top. */

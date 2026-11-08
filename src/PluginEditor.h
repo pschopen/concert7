@@ -68,7 +68,7 @@ private:
     StereoMeter inMeter { "IN" }, outMeter { "OUT" };
 
     // tabs
-    static constexpr int kNumTabs = 5, kSpaceTab = 4;
+    static constexpr int kNumTabs = 6, kSpaceTab = 4, kTakesTab = 5;   // TAKES: only for split captures (LS)
     std::array<juce::TextButton, kNumTabs> tabButtons;
     juce::TextButton setupButton { "SETUP" };
     juce::TextButton undoButton { "UNDO" }, redoButton { "REDO" }, slotA { "A" }, slotB { "B" }, copySlot { "A > B" };
@@ -80,6 +80,10 @@ private:
     std::unique_ptr<ParamToggle> predelaySync, delaySync, duckSidechain, eqOn, eqHpOn, eqLpOn;
     std::unique_ptr<ParamCombo> predelayNote, delayNote, crossfeed, eqLowType, eqHighType, modMode;
     juce::Label crossfeedLabel, predelayNoteLabel, delayNoteLabel;
+
+    // takes page (split captures)
+    std::unique_ptr<ParamCombo> takeMode;
+    juce::Label takesInUse;
 
     // decay + eq pages
     DecayView decayView;

@@ -6,6 +6,7 @@
 
 #include "TestHelpers.h"
 #include "PluginProcessor.h"
+#include "dsp/ConvolutionEngine.h"
 #include "dsp/IRLibrary.h"
 #include <set>
 
@@ -70,6 +71,39 @@ namespace
         writeWav (dir.getChildFile ("tail-1.wav"), late);
         writeWav (dir.getChildFile ("head-2.wav"), early);
         writeWav (dir.getChildFile ("tail-2.wav"), ownTake ? syntheticLate (rt60, seed + 2) : late);
+    }
+
+    /** A capture with four takes: reflections that differ slightly (take 3 the same as take 1), late reverbs with a
+        fine structure of their own (take 3 a copy of take 1). */
+    void writeTakes (const File& root, const String& bank, const String& preset, float rt60, int seed)
+    {
+        const auto dir = root.getChildFile (bank).getChildFile (preset);
+        const auto early = syntheticEarly (seed);
+        const auto late = syntheticLate (rt60, seed + 1);
+        for (int take = 1; take <= 4; ++take)
+        {
+            auto head = early;
+            if (take == 2 || take == 4)
+            {
+                Random rng (seed + 10 * take);
+                for (auto& c : head) for (auto& v : c) v *= 1.0f + 0.05f * (rng.nextFloat() * 2.0f - 1.0f);
+            }
+            writeWav (dir.getChildFile ("head-" + String (take) + ".wav"), head);
+            writeWav (dir.getChildFile ("tail-" + String (take) + ".wav"),
+                      take == 1 || take == 3 ? late : syntheticLate (rt60, seed + 1 + take));
+        }
+    }
+
+    /** First sample above -60 dB of the peak, over all channels. */
+    int firstSound (const std::array<std::vector<float>, 4>& ch)
+    {
+        float peak = 0.0f;
+        for (auto& c : ch) for (float v : c) peak = std::max (peak, std::abs (v));
+        int first = std::numeric_limits<int>::max();
+        for (auto& c : ch)
+            for (int i = 0; i < (int) c.size(); ++i)
+                if (std::abs (c[(size_t) i]) > peak * 1e-3f) { first = std::min (first, i); break; }
+        return first;
     }
 
     float maxDiff (const std::vector<float>& a, const std::vector<float>& b)
@@ -276,6 +310,198 @@ public:
             }
         }
 
+        beginTest ("takes: loaded when needed, built like the first, the variant left to them");
+        {
+            root.deleteRecursively();
+            writeTakes (splitFolder, "Halls2", "02 Large Hall", 1.5f, 51);
+            IRLibrary lib;
+            lib.scan ({}, splitFolder);
+            String err;
+            const auto* preset = lib.find ("Split/Halls2/02 Large Hall");
+            auto src = preset != nullptr ? loadSourceIR (*preset, kRate, err) : nullptr;
+            expect (src != nullptr, err);
+            if (src != nullptr)
+            {
+                expect (! src->takesLoaded && src->lateTakes.empty(), "the takes are loaded only when needed");
+                expect (loadSourceTakes (*preset, *src, err), err);
+                expect (src->takesLoaded);
+                expectEquals ((int) src->earlyTakes.size(), 2, "reflections like take 1's are left out");
+                expectEquals ((int) src->lateTakes.size(), 2, "a late reverb that is a copy is left out");
+                for (auto* takes : { &src->earlyTakes, &src->lateTakes })
+                    for (auto& take : *takes)
+                        for (size_t c = 0; c < 4; ++c)
+                            expectEquals ((int) take[c].size(), src->length(), "a take as long as the blocks");
+                float diff = 0.0f;
+                for (size_t c = 0; c < 4; ++c)
+                    diff = std::max (diff, maxDiff (src->lateTakes[0][c], src->lateTake[c]));
+                expectEquals (diff, 0.0f, "take 2 made like the variant of the blocks: same scale");
+
+                // off: nothing of the takes; late: the late reverbs of all takes, as recorded at the preset's own decay
+                DesignParams d;
+                d.decay = src->nativeRT;
+                d.splitLate = d.lateVariant = true;
+                auto ir = designIR (*src, nullptr, d);
+                expect (ir->earlyTakes.empty() && ir->lateTakes.empty(), "no takes while off");
+                expect (ir->hasVariant());
+                d.takes = TakeMode::Late;
+                ir = designIR (*src, nullptr, d);
+                expect (ir->earlyTakes.empty(), "LATE: the reflections stay take 1");
+                expectEquals ((int) ir->lateTakes.size(), 2);
+                expect (! ir->hasVariant(), "the takes move the late reverb, no variant");
+                diff = 0.0f;
+                for (size_t t = 0; t < ir->lateTakes.size(); ++t)
+                    for (size_t c = 0; c < 4; ++c)
+                        diff = std::max (diff, maxDiff (ir->lateTakes[t][c], src->lateTakes[t][c]));
+                expectEquals (diff, 0.0f, "every take as recorded");
+                expectEquals ((int) ir->lateTakeRho.size(), 3, "neighbours in the sequence of three takes");
+                for (float r : ir->lateTakeRho)
+                    expectLessThan (std::abs (r), 0.3f, "late takes of their own are hardly alike");
+
+                d.takes = TakeMode::EarlyAndLate;
+                ir = designIR (*src, nullptr, d);
+                expectEquals ((int) ir->earlyTakes.size(), 2);
+                diff = 0.0f;
+                for (size_t t = 0; t < ir->earlyTakes.size(); ++t)
+                    for (size_t c = 0; c < 4; ++c)
+                        diff = std::max (diff, maxDiff (ir->earlyTakes[t][c], src->earlyTakes[t][c]));
+                expectEquals (diff, 0.0f, "the reflections of every take as recorded");
+                for (float r : ir->earlyTakeRho)
+                    expectGreaterThan (r, 0.9f, "the reflections of the takes are alike");
+
+                // a longer decay: every take decays like the first
+                d.decay = src->nativeRT * 1.5f;
+                ir = designIR (*src, nullptr, d);
+                const float rtLate = estimateRT (chans (ir->late), kRate, 500.0f, 2000.0f);
+                for (auto& take : ir->lateTakes)
+                    expectWithinAbsoluteError (estimateRT (chans (take), kRate, 500.0f, 2000.0f), rtLate, 0.08f * rtLate,
+                                               "a take at decay x1.5");
+
+                // Stretch: the takes are stretched with the blocks
+                d.decayMode = DecayMode::Stretch;
+                d.decay = src->nativeRT * 1.25f;
+                ir = designIR (*src, nullptr, d);
+                expectEquals ((int) ir->lateTakes.size(), 2, "Stretch keeps the takes");
+                if (! ir->lateTakes.empty())
+                    expectEquals (ir->lateTakes[0][0].size(), ir->late[0].size());
+            }
+        }
+
+        beginTest ("late offset: the late block against the reflections, earlier at most to its first sound");
+        {
+            String err;
+            IRLibrary lib;
+            lib.scan ({}, splitFolder);
+            const auto* preset = lib.find ("Split/Halls2/02 Large Hall");
+            auto src = preset != nullptr ? loadSourceIR (*preset, kRate, err) : nullptr;
+            expect (src != nullptr, err);
+            if (src != nullptr)
+            {
+                DesignParams d;
+                d.decay = src->nativeRT;
+                d.splitLate = true;
+                d.lateOffsetMs = 10.0f;
+                auto ir = designIR (*src, nullptr, d);
+                const int shift = (int) std::lround (0.01 * kRate);
+                float diff = 0.0f;
+                for (size_t c = 0; c < 4; ++c)
+                {
+                    std::vector<float> shifted ((size_t) shift, 0.0f);
+                    shifted.insert (shifted.end(), src->lateBlock[c].begin(), src->lateBlock[c].end());
+                    diff = std::max (diff, maxDiff (ir->late[c], shifted));
+                }
+                expectEquals (diff, 0.0f, "+10 ms: the late block 10 ms later");
+                diff = 0.0f;
+                for (size_t c = 0; c < 4; ++c)
+                    diff = std::max (diff, maxDiff (ir->ch[c], src->earlyBlock[c]));
+                expectEquals (diff, 0.0f, "the reflections stay");
+
+                d.lateOffsetMs = -kMaxLateOffsetMs;
+                ir = designIR (*src, nullptr, d);
+                expectEquals (firstSound (ir->late), 0, "-200 ms: the late block starts with its first sound");
+                const int first = firstSound (src->lateBlock);
+                double kept = 0.0, all = 0.0;
+                for (size_t c = 0; c < 4; ++c)
+                {
+                    kept += energy (ir->late[c]);
+                    all += energy (src->lateBlock[c]);
+                }
+                expectGreaterThan (first, 0);
+                expectWithinAbsoluteError ((float) (kept / all), 1.0f, 1.0e-5f, "nothing of the late reverb is cut");
+
+                // the other libraries: no late offset (their late reverb is cut out of one response)
+                auto plain = makeSourceIR (src->ch, true, kRate, kRate, "plain");
+                DesignParams q;
+                q.decay = plain->nativeRT;
+                auto a = designIR (*plain, nullptr, q);
+                q.lateOffsetMs = 50.0f;
+                auto b = designIR (*plain, nullptr, q);
+                diff = 0.0f;
+                for (size_t c = 0; c < 4; ++c)
+                    diff = std::max (diff, maxDiff (a->ch[c], b->ch[c]));
+                expectEquals (diff, 0.0f, "a combined response ignores the late offset");
+            }
+            root.deleteRecursively();
+        }
+
+        beginTest ("the convolution fades from take to take and keeps the level");
+        {
+            // take k: an impulse at 10 k samples, in the early part (the late reverb works alike)
+            auto ir = std::make_shared<BuiltIR>();
+            ir->sampleRate = kRate;
+            ir->trueStereo = false;
+            auto impulseAt = [] (int pos) {
+                std::array<std::vector<float>, 4> ch;
+                ch[0].assign (64, 0.0f);
+                ch[0][(size_t) pos] = 1.0f;
+                ch[3] = ch[0];
+                return ch;
+            };
+            ir->ch = impulseAt (0);
+            ir->earlyTakes = { impulseAt (10), impulseAt (20) };
+            for (float rho : { 0.0f, 1.0f })
+            {
+                ir->earlyTakeRho = { rho, rho, rho };
+                TrueStereoConvolver conv;
+                const int n = 64;
+                std::vector<float> in ((size_t) n, 0.0f), zero ((size_t) n, 0.0f), scratch ((size_t) (n * TrueStereoConvolver::kScratchPerSample));
+                std::vector<std::vector<float>> bufs (2 * WetStreams::kNumStreams, std::vector<float> ((size_t) n));
+                WetStreams out;
+                for (size_t i = 0; i < out.ch.size(); ++i) out.ch[i] = bufs[i].data();
+                in[0] = 1.0f;
+                auto at = [&] (double position) {
+                    conv.load (ir, 64, 8192);
+                    const TakeClock clock { position, 0.0 };
+                    conv.process (in.data(), zero.data(), out, n, true, scratch.data(), &clock);
+                    return std::array<float, 3> { out.l (0)[0], out.l (0)[10], out.l (0)[20] };
+                };
+                // (the convolution is exact to float rounding)
+                auto only = [&] (const std::array<float, 3>& w, int take, const String& what) {
+                    for (int t = 0; t < 3; ++t)
+                        expectWithinAbsoluteError (w[(size_t) t], t == take ? 1.0f : 0.0f, 1.0e-5f, what);
+                };
+                only (at (0.0), 0, "at 0: take 0");
+                only (at (1.0), 1, "at 1: take 1");
+                auto w = at (0.5);
+                const float half = rho > 0.5f ? 0.5f : std::sqrt (0.5f);
+                expectWithinAbsoluteError (w[0], half, 1.0e-5f, "half way, rho " + String (rho));
+                expectWithinAbsoluteError (w[1], half, 1.0e-5f);
+                w = at (2.5);
+                expectWithinAbsoluteError (w[2], half, 1.0e-5f, "the last take fades into the first");
+                expectWithinAbsoluteError (w[0], half, 1.0e-5f);
+                only (at (3.0), 0, "the sequence starts again");
+                // the level of the mix of independent takes stays: the weights' squares add up to one
+                for (double pos : { 0.2, 0.7, 1.4, 2.9 })
+                {
+                    w = at (pos);
+                    if (rho < 0.5f)
+                        expectWithinAbsoluteError (w[0] * w[0] + w[1] * w[1] + w[2] * w[2], 1.0f, 1.0e-5f, "power at " + String (pos));
+                    else
+                        expectWithinAbsoluteError (w[0] + w[1] + w[2], 1.0f, 1.0e-5f, "gain at " + String (pos));
+                }
+                conv.unload();
+            }
+        }
+
         beginTest ("other impulse responses: categories by subfolder, a folder of their own");
         {
             root.deleteRecursively();
@@ -394,10 +620,30 @@ public:
             // a preset without a counterpart: the first of its category in the other library
             proc.selectPreset ("Split/Halls2/03 Small Hall", true);
             settle();
+
+            // the takes: off when a preset is chosen; on, the late reverb moves through them (and Drift has nothing
+            // to do); a library of combined responses has none
+            expectEquals (value (ParamID::takeMode), 0.0f, "takes off for a chosen preset");
+            expect (proc.getCurrentIR() != nullptr && proc.getCurrentIR()->lateTakes.empty());
+            set (ParamID::takeMode, (float) TakeMode::Late);
+            settle();
+            if (auto ir = proc.getCurrentIR())
+            {
+                expectEquals ((int) ir->lateTakes.size(), 1, "LATE: the other take of the late reverb");
+                expect (ir->hasLate() && ! ir->hasVariant());
+            }
+            set (ParamID::takeMode, (float) TakeMode::Off);
+            settle();
             expect (proc.switchLibrary (IROrigin::Combined));
             settle();
             expectEquals (proc.getPresetId(), String ("Halls/01 Large Hall"));
             expectWithinAbsoluteError (value (ParamID::decay), samNative, 0.02f);
+            set (ParamID::takeMode, (float) TakeMode::EarlyAndLate);
+            settle();
+            if (auto ir = proc.getCurrentIR())
+                expect (ir->earlyTakes.empty() && ir->lateTakes.empty() && ! ir->hasLate(),
+                        "combined responses: no takes, nothing split off");
+            set (ParamID::takeMode, (float) TakeMode::Off);
 
             // OTHER: the own impulse responses, stepping among them only
             expect (proc.switchLibrary (IROrigin::User));
@@ -486,6 +732,33 @@ public:
         logMessage ("  " + String (ownTakes) + " captures with a take of their own, average load "
                     + String (loadMs / 221.0, 0) + " ms");
         expectGreaterThan (ownTakes, 40, "the second banks' takes have their own fine structure");
+
+        beginTest ("the takes of real captures: all of the second banks', the reflections of all");
+        for (auto [id, lateTakes] : { std::pair { "Split/Halls2/01 Large Hall", 7 }, std::pair { "Split/Halls1/01 Large Hall", 0 } })
+        {
+            const auto* p = lib.find (id);
+            expect (p != nullptr, id);
+            if (p == nullptr) continue;
+            String err;
+            auto src = loadSourceIR (*p, kRate, err);
+            const auto t0 = Time::getMillisecondCounterHiRes();
+            expect (src != nullptr && loadSourceTakes (*p, *src, err), err);
+            if (src == nullptr) continue;
+            logMessage ("  " + String (id) + ": " + String ((int) src->earlyTakes.size()) + " + 1 early, "
+                        + String ((int) src->lateTakes.size()) + " + 1 late takes, loaded in "
+                        + String (Time::getMillisecondCounterHiRes() - t0, 0) + " ms");
+            expectEquals ((int) src->lateTakes.size(), lateTakes, String (id) + " late takes");
+            expectEquals ((int) src->earlyTakes.size(), 7, String (id) + " the reflections differ a little");
+            DesignParams d;
+            d.decay = src->nativeRT;
+            d.splitLate = true;
+            d.takes = TakeMode::EarlyAndLate;
+            auto ir = designIR (*src, nullptr, d);
+            for (float r : ir->lateTakeRho)
+                expectLessThan (std::abs (r), 0.3f, String (id) + " late neighbours");
+            for (float r : ir->earlyTakeRho)
+                expectGreaterThan (r, 0.85f, String (id) + " early neighbours");
+        }
     }
 };
 

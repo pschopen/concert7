@@ -187,7 +187,7 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void handleAsyncUpdate() override;
     /** The convolution of n host rate samples: under-sampled when active, paused after a long silence. */
-    void convolve (const float* inL, const float* inR, const WetStreams& out, int n, bool crossfeed);
+    void convolve (const float* inL, const float* inR, const WetStreams& out, int n, bool crossfeed, double takesPerSecond);
     void requestRebuild();
     void resetParameters();
     void applyParameters (const juce::ValueTree& tree, GroupMask keep, bool skipDecay);
@@ -213,6 +213,7 @@ private:
     juce::AudioBuffer<float> wet, dry, wetLate;   // wetLate: late reverb and its variant (modulation)
     juce::SmoothedValue<float> dryGainSmooth, wetGainSmooth, gainSmooth;
     std::atomic<float> irMidEnergy { 0.0f }, irMidEnergyDiagonal { 0.0f }, irOnsetMs { 0.0f };  // of the last built IR
+    std::atomic<bool> irLateTakes { false };   // ... it moves through takes of its late reverb (instead of Drift)
     std::atomic<float> distanceReference { 8.0f };   // m, stored with the project
     std::atomic<float> pendingDistance { -1.0f };    // reference to be written to the distance parameter
     std::atomic<float> pendingHallVolume { -1.0f }, pendingHallAbsorption { -1.0f };  // written when the hall is switched on

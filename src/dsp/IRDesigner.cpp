@@ -8,6 +8,7 @@
 #include "PostProcessing.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <cmath>
+#include <future>
 #include <algorithm>
 #include <limits>
 #include <mutex>
@@ -52,6 +53,7 @@ namespace
     constexpr float kVariantMaxGain   = 4.0f;
     constexpr int64 kVariantSeed      = 0x7a11;
     constexpr double kOwnTakeCorrelation = 0.5; // split captures: a take below this correlation is a variant of its own
+    constexpr double kSameTakeCorrelation = 0.9999; // ... reflections above it are the same as the first take's
     constexpr double kPi = MathConstants<double>::pi;
 
     int stftSizeFor (double sr) { return sr <= 50000.0 ? 2048 : (sr <= 100000.0 ? 4096 : 8192); }
@@ -475,7 +477,7 @@ bool DesignParams::operator== (const DesignParams& o) const
         && vlfDb == o.vlfDb && erRolloffHz == o.erRolloffHz && lateRolloffHz == o.lateRolloffHz
         && delayMs == o.delayMs && delayDb == o.delayDb && lowFreq == o.lowFreq && lowMult == o.lowMult
         && highFreq == o.highFreq && highMult == o.highMult && smooth == o.smooth
-        && splitLate == o.splitLate && lateVariant == o.lateVariant;
+        && splitLate == o.splitLate && lateVariant == o.lateVariant && takes == o.takes && lateOffsetMs == o.lateOffsetMs;
 }
 
 //==============================================================================
@@ -989,6 +991,8 @@ std::shared_ptr<SourceIR> makeSource (std::vector<std::array<std::vector<float>,
             for (size_t i = c.size(); i-- > 0;)
                 if (std::abs (c[i]) > peak * 1e-6f) { used = std::max (used, i + 1); break; }
     maxLen = std::min (maxLen, std::max<size_t> (used, 64));
+    src->blockFileRate = sourceRate;
+    src->blockFileLength = maxLen;
 
     const int numUsed = trueStereo ? 4 : 2;
     const int idx[4] = { 0, 3, 1, 2 };
@@ -1021,6 +1025,7 @@ std::shared_ptr<SourceIR> makeSource (std::vector<std::array<std::vector<float>,
     if (power > 1e-20)
     {
         const float g = (float) std::sqrt (kNormTargetPower / power * std::pow (10.0, gainDb / 10.0));
+        src->blockGain = g;
         if (blocks)
         {
             // the blocks are scaled, their sum is formed again: early + late gives ch exactly
@@ -1069,29 +1074,80 @@ std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> early,
     return makeSource (std::move (parts), trueStereo, sourceRate, hostRate, name, gainDb);
 }
 
+namespace
+{
+/** Reads an audio file, at most kMaxIRSeconds of it. */
+bool readAudioFile (AudioFormatManager& fm, const File& f, AudioBuffer<float>& buf, double& sr, String& error)
+{
+    std::unique_ptr<AudioFormatReader> reader (fm.createReaderFor (f));
+    if (reader == nullptr || reader->lengthInSamples <= 0)
+    {
+        error = "Cannot read " + f.getFileName();
+        return false;
+    }
+    const auto maxSamples = (int64) (kMaxIRSeconds * reader->sampleRate);
+    buf.setSize ((int) reader->numChannels, (int) std::min (reader->lengthInSamples, maxSamples));
+    reader->read (&buf, 0, buf.getNumSamples(), 0, true, true);
+    sr = reader->sampleRate;
+    return true;
+}
+
+std::vector<float> fileChannel (const AudioBuffer<float>& b, int c)
+{
+    c = std::min (c, b.getNumChannels() - 1);
+    return std::vector<float> (b.getReadPointer (c), b.getReadPointer (c) + b.getNumSamples());
+}
+
+/** A file of split captures as SourceIR channels: true stereo all four, else the outer two. */
+std::array<std::vector<float>, 4> splitChannels (const AudioBuffer<float>& b, bool trueStereo)
+{
+    std::array<std::vector<float>, 4> ch;
+    const int used[4] = { 0, trueStereo ? 1 : -1, trueStereo ? 2 : -1, trueStereo ? 3 : 1 };
+    for (int c = 0; c < 4; ++c)
+        if (used[c] >= 0)
+            ch[(size_t) c] = fileChannel (b, used[c]);
+    return ch;
+}
+
+/** Correlation of two responses over all their channels (1 when one is silent). */
+double takeCorrelation (const std::array<std::vector<float>, 4>& a, const std::array<std::vector<float>, 4>& b)
+{
+    double ab = 0.0, aa = 0.0, bb = 0.0;
+    for (size_t c = 0; c < 4; ++c)
+    {
+        const size_t n = std::min (a[c].size(), b[c].size());
+        for (size_t i = 0; i < n; ++i)
+        {
+            ab += (double) a[c][i] * b[c][i];
+            aa += (double) a[c][i] * a[c][i];
+            bb += (double) b[c][i] * b[c][i];
+        }
+    }
+    return aa > 0.0 && bb > 0.0 ? ab / std::sqrt (aa * bb) : 1.0;
+}
+
+/** A take at the rate of dst's files made like dst's blocks: trimmed, resampled and scaled alike, their length. */
+void prepareTake (std::array<std::vector<float>, 4>& take, const SourceIR& dst)
+{
+    for (auto& c : take)
+    {
+        if (c.empty()) continue;
+        c.resize (dst.blockFileLength, 0.0f);
+        c = resample (c, dst.blockFileRate, dst.sampleRate);
+        for (auto& v : c) v *= dst.blockGain;
+        c.resize ((size_t) dst.length(), 0.0f);
+    }
+}
+} // namespace
+
 std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate, String& error)
 {
     const auto variant = preset.bestVariantFor (hostRate).second;
     AudioFormatManager fm;
     fm.registerBasicFormats();
 
-    auto readFile = [&] (const File& f, AudioBuffer<float>& buf, double& sr) -> bool {
-        std::unique_ptr<AudioFormatReader> reader (fm.createReaderFor (f));
-        if (reader == nullptr || reader->lengthInSamples <= 0)
-        {
-            error = "Cannot read " + f.getFileName();
-            return false;
-        }
-        const auto maxSamples = (int64) (kMaxIRSeconds * reader->sampleRate);
-        buf.setSize ((int) reader->numChannels, (int) std::min (reader->lengthInSamples, maxSamples));
-        reader->read (&buf, 0, buf.getNumSamples(), 0, true, true);
-        sr = reader->sampleRate;
-        return true;
-    };
-    auto chan = [] (const AudioBuffer<float>& b, int c) {
-        c = std::min (c, b.getNumChannels() - 1);
-        return std::vector<float> (b.getReadPointer (c), b.getReadPointer (c) + b.getNumSamples());
-    };
+    auto readFile = [&] (const File& f, AudioBuffer<float>& buf, double& sr) { return readAudioFile (fm, f, buf, sr, error); };
+    auto chan = fileChannel;
 
     std::array<std::vector<float>, 4> ch;
     bool trueStereo = false;
@@ -1110,14 +1166,9 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
             return nullptr;
         }
         trueStereo = a.getNumChannels() >= 4 && b.getNumChannels() >= 4;
-        std::array<std::vector<float>, 4> early, late, take;
-        const int used[4] = { 0, trueStereo ? 1 : -1, trueStereo ? 2 : -1, trueStereo ? 3 : 1 };
-        for (int c = 0; c < 4; ++c)
-            if (used[c] >= 0)
-            {
-                early[(size_t) c] = chan (a, used[c]);
-                late[(size_t) c] = chan (b, used[c]);
-            }
+        auto early = splitChannels (a, trueStereo);
+        auto late = splitChannels (b, trueStereo);
+        std::array<std::vector<float>, 4> take;
 
         // the next take, where it has a fine structure of its own (correlation of the late reverb clearly below 1)
         if (variant.tails.size() >= 2)
@@ -1137,8 +1188,7 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
                 }
                 const double rho = aa > 0.0 && bb > 0.0 ? ab / std::sqrt (aa * bb) : 1.0;
                 if (std::abs (rho) < kOwnTakeCorrelation)
-                    for (int c = 0; c < 4; ++c)
-                        if (used[c] >= 0) take[(size_t) c] = chan (t, used[c]);
+                    take = splitChannels (t, trueStereo);
             }
             error = noError;
         }
@@ -1188,6 +1238,60 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
     return src;
 }
 
+bool loadSourceTakes (const IRPreset& preset, SourceIR& src, String& error)
+{
+    if (src.takesLoaded || ! src.hasBlocks()) return true;
+    src.takesLoaded = true;
+    const auto variant = preset.bestVariantFor (src.sampleRate).second;
+    if (! variant.hasBlocks()) return true;
+
+    // every take on a thread of its own (reading and resampling); a take that cannot be read is left out
+    struct Loaded
+    {
+        std::array<std::vector<float>, 4> take;
+        String error;
+    };
+    auto load = [&src] (File f) {
+        Loaded r;
+        AudioFormatManager fm;
+        fm.registerBasicFormats();
+        AudioBuffer<float> b;
+        double sr = 0.0;
+        if (! readAudioFile (fm, f, b, sr, r.error))
+            return r;
+        if (std::abs (sr - src.blockFileRate) > 0.5 || (src.trueStereo && b.getNumChannels() < 4))
+        {
+            r.error = "Different format in " + f.getFileName();
+            return r;
+        }
+        r.take = splitChannels (b, src.trueStereo);
+        prepareTake (r.take, src);
+        return r;
+    };
+    std::vector<std::future<Loaded>> heads, tails;
+    for (size_t k = 1; k < variant.heads.size(); ++k)
+        heads.push_back (std::async (std::launch::async, load, variant.heads[k]));
+    for (size_t k = 1; k < variant.tails.size(); ++k)
+        tails.push_back (std::async (std::launch::async, load, variant.tails[k]));
+
+    bool ok = true;
+    for (auto& h : heads)
+    {
+        auto r = h.get();
+        if (r.error.isNotEmpty()) { error = r.error; ok = false; continue; }
+        if (takeCorrelation (r.take, src.earlyBlock) < kSameTakeCorrelation)
+            src.earlyTakes.push_back (std::move (r.take));
+    }
+    for (auto& t : tails)
+    {
+        auto r = t.get();
+        if (r.error.isNotEmpty()) { error = r.error; ok = false; continue; }
+        if (std::abs (takeCorrelation (r.take, src.lateBlock)) < kOwnTakeCorrelation)
+            src.lateTakes.push_back (std::move (r.take));
+    }
+    return ok;
+}
+
 //==============================================================================
 namespace
 {
@@ -1209,6 +1313,10 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
 
     const std::vector<int> chans = src.trueStereo ? std::vector<int> { 0, 1, 2, 3 } : std::vector<int> { 0, 3 };
     const bool blocks = src.hasBlocks();
+    // the other takes, as responses of their own (the reflections only where they are the preset's own)
+    const bool earlyTakes = p.splitLate && blocks && pattern == nullptr && p.takes == TakeMode::EarlyAndLate
+                         && ! src.earlyTakes.empty();
+    const bool lateTakes = p.splitLate && blocks && p.takes != TakeMode::Off && ! src.lateTakes.empty();
 
     // ---- early / late crossover
     const float splitSec = jlimit (0.015f, kSplitMaxSeconds, 0.25f * src.nativeRT);
@@ -1285,9 +1393,15 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         {
             const int esChan = ! es.trueStereo && (c == 1 || c == 2) ? -1 : c;
             if (esChan < 0) continue;
-            const auto& x = es.earlyBlock[(size_t) esChan];
-            for (int n = (int) x.size(); n-- > earlyLen;)
-                if (x[(size_t) n] != 0.0f) { earlyLen = n + 1; break; }
+            std::vector<const std::array<std::vector<float>, 4>*> scanned { &es.earlyBlock };
+            if (earlyTakes)
+                for (const auto& take : src.earlyTakes) scanned.push_back (&take);
+            for (const auto* block : scanned)
+            {
+                const auto& x = (*block)[(size_t) esChan];
+                for (int n = (int) x.size(); n-- > earlyLen;)
+                    if (x[(size_t) n] != 0.0f) { earlyLen = n + 1; break; }
+            }
         }
         earlyLen = std::max (1, earlyLen - (pattern != nullptr ? pattern->onset - src.onset : 0));
     }
@@ -1342,10 +1456,24 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
             earlyEnergy += midBandEnergy (e, sr); // before the roll-off, which stays the user's
         lowPassInPlace (e, sr, p.erRolloffHz);
     }
+    // the other takes of the reflections, like the first (a block of their own: only the roll-off)
+    std::vector<std::array<std::vector<float>, 4>> earlyOfTake (earlyTakes ? src.earlyTakes.size() : 0);
+    for (size_t t = 0; t < earlyOfTake.size(); ++t)
+        for (int c : chans)
+        {
+            auto& e = earlyOfTake[t][(size_t) c];
+            e.assign ((size_t) earlyLen, 0.0f);
+            const auto& x = src.earlyTakes[t][(size_t) c];
+            std::copy (x.begin(), x.begin() + std::min (earlyLen, (int) x.size()), e.begin());
+            lowPassInPlace (e, sr, p.erRolloffHz);
+        }
 
     // ---- late part (and the modulation's variant from another take, where the recording has one)
     std::array<std::vector<float>, 4> late, variantLate;
-    const bool takeVariant = p.splitLate && p.lateVariant && src.hasLateTake();
+    std::vector<std::array<std::vector<float>, 4>> lateOfTake (lateTakes ? src.lateTakes.size() : 0);
+    // the variant moves the late reverb where it has no takes of its own
+    const bool lateVariant = p.lateVariant && ! lateTakes;
+    const bool takeVariant = p.splitLate && lateVariant && src.hasLateTake();
     auto lateInput = [&] (const std::array<std::vector<float>, 4>& from, int c, std::vector<float>& x) {
         x.assign ((size_t) len, 0.0f);
         if (blocks)
@@ -1361,6 +1489,8 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
             lateInput (blocks ? src.lateBlock : src.ch, c, late[(size_t) c]);
             if (takeVariant)
                 lateInput (src.lateTake, c, variantLate[(size_t) c]);
+            for (size_t t = 0; t < lateOfTake.size(); ++t)
+                lateInput (src.lateTakes[t], c, lateOfTake[t][(size_t) c]);
         }
     }
     else
@@ -1644,6 +1774,12 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
                 lateInput (src.lateTake, c, lateIn);
                 variantLate[(size_t) c] = resynthesise (ci, 0x7a4e, false);
             }
+            // every take continues with noise of its own
+            for (size_t t = 0; t < lateOfTake.size(); ++t)
+            {
+                lateInput (src.lateTakes[t], c, lateIn);
+                lateOfTake[t][(size_t) c] = resynthesise (ci, 0x3a00 + (int64) t, false);
+            }
         }
 
         // the user's roll-off and Smooth stay: the late energy without them (staticAmp over the mid bins, weighted
@@ -1681,8 +1817,24 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     const float gD = delayOn ? Decibels::decibelsToGain (p.delayDb) : 0.0f;
 
     const int lateLen = (int) late[(size_t) chans.front()].size();
+    // the late offset (split captures): the late block moves against the reflections, earlier at most up to its
+    // first sound (-60 dB re. its peak), so nothing of it is cut
+    int lateStart = pd;
+    if (blocks && std::abs (p.lateOffsetMs) > 1e-3f)
+    {
+        float peak = 0.0f;
+        for (int c : chans) for (float v : late[(size_t) c]) peak = std::max (peak, std::abs (v));
+        int first = lateLen;
+        for (int c : chans)
+        {
+            const auto& x = late[(size_t) c];
+            for (int n = 0; n < std::min (first, (int) x.size()); ++n)
+                if (std::abs (x[(size_t) n]) > peak * 1e-3f) { first = n; break; }
+        }
+        lateStart = std::max (pd + (int) std::lround (p.lateOffsetMs * 0.001 * sr), -first);
+    }
     const int maxLen = (int) (kMaxIRSeconds * sr);
-    int total = std::max ((int) early[(size_t) chans.front()].size(), pd + lateLen + voices * dd);
+    int total = std::max ((int) early[(size_t) chans.front()].size(), std::max (1, lateStart + lateLen + voices * dd));
     // offset: leading silence, or the start is cut (keeping at least one sample)
     const int pad = std::max (0, shift);
     const int cut = std::min (std::max (0, -shift), total - 1);
@@ -1702,8 +1854,8 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         float g = lateGain;
         for (int v = 0; v <= voices; ++v)
         {
-            const int offset = pd + v * dd;
-            for (int n = 0; n < (int) l.size() && n + offset < total; ++n)
+            const int offset = lateStart + v * dd;
+            for (int n = std::max (0, -offset); n < (int) l.size() && n + offset < total; ++n)
                 o[(size_t) (n + offset)] += l[(size_t) n] * g;
             g *= gD;
         }
@@ -1759,27 +1911,51 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     if (p.splitLate)
     {
         // the variant: the same late reverb from another take, else with new random phases
-        if (p.lateVariant && ! takeVariant)
+        if (lateVariant && ! takeVariant)
             variantLate = makeVariant (late, chans, sr);
         const std::vector<float> none;
+        out->earlyTakes.resize (earlyOfTake.size());
+        out->lateTakes.resize (lateOfTake.size());
         for (int c : chans)
         {
             assemble (out->late[(size_t) c], none, 0.0f, late[(size_t) c], gL);
-            if (p.lateVariant)
+            if (lateVariant)
                 assemble (out->variant[(size_t) c], none, 0.0f, variantLate[(size_t) c], gL);
             assemble (out->ch[(size_t) c], early[(size_t) c], gE, none, 0.0f);
+            for (size_t t = 0; t < earlyOfTake.size(); ++t)
+                assemble (out->earlyTakes[t][(size_t) c], earlyOfTake[t][(size_t) c], gE, none, 0.0f);
+            for (size_t t = 0; t < lateOfTake.size(); ++t)
+                assemble (out->lateTakes[t][(size_t) c], none, 0.0f, lateOfTake[t][(size_t) c], gL);
         }
 
         // the early part ends long before the late reverb: drop its trailing zeros (saves convolution)
+        std::vector<std::array<std::vector<float>, 4>*> earlyParts { &out->ch };
+        for (auto& take : out->earlyTakes) earlyParts.push_back (&take);
         int end = 1;
-        for (int c : chans)
-        {
-            const auto& e = out->ch[(size_t) c];
-            for (int n = (int) e.size() - 1; n >= end; --n)
-                if (e[(size_t) n] != 0.0f) { end = n + 1; break; }
-        }
-        for (int c : chans)
-            out->ch[(size_t) c].resize ((size_t) end);
+        for (auto* part : earlyParts)
+            for (int c : chans)
+            {
+                const auto& e = (*part)[(size_t) c];
+                for (int n = (int) e.size() - 1; n >= end; --n)
+                    if (e[(size_t) n] != 0.0f) { end = n + 1; break; }
+            }
+        for (auto* part : earlyParts)
+            for (int c : chans)
+                (*part)[(size_t) c].resize ((size_t) end);
+
+        // the sequence of the takes: how alike neighbours are (the convolution keeps the level while it fades)
+        auto neighbours = [] (const std::array<std::vector<float>, 4>& first,
+                              const std::vector<std::array<std::vector<float>, 4>>& others) {
+            std::vector<float> rho;
+            if (others.empty()) return rho;
+            std::vector<const std::array<std::vector<float>, 4>*> all { &first };
+            for (const auto& t : others) all.push_back (&t);
+            for (size_t k = 0; k < all.size(); ++k)
+                rho.push_back ((float) jlimit (-1.0, 1.0, takeCorrelation (*all[k], *all[(k + 1) % all.size()])));
+            return rho;
+        };
+        out->earlyTakeRho = neighbours (out->ch, out->earlyTakes);
+        out->lateTakeRho = neighbours (out->late, out->lateTakes);
     }
 
     return out;
@@ -1801,7 +1977,7 @@ std::shared_ptr<const SourceIR> stretchedSource (const SourceIR& src, float fact
     static std::mutex cacheLock;
     {
         const std::lock_guard<std::mutex> lk (cacheLock);
-        if (src.stretched != nullptr && src.stretchedFactor == factor)
+        if (src.stretched != nullptr && src.stretchedFactor == factor && src.stretched->takesLoaded == src.takesLoaded)
             return src.stretched;
     }
     // taken as recorded at 1 / factor of its rate and resampled back, the response lasts factor times as long
@@ -1810,6 +1986,17 @@ std::shared_ptr<const SourceIR> stretchedSource (const SourceIR& src, float fact
                                               src.sampleRate, src.name, gainDb)
                               : makeSourceIR (src.ch, src.trueStereo, src.sampleRate / factor, src.sampleRate, src.name, gainDb);
     st->presetId = src.presetId;
+    // the other takes, stretched alike
+    if (src.takesLoaded)
+    {
+        st->takesLoaded = true;
+        for (auto [from, to] : { std::pair { &src.earlyTakes, &st->earlyTakes }, std::pair { &src.lateTakes, &st->lateTakes } })
+            for (auto take : *from)
+            {
+                prepareTake (take, *st);
+                to->push_back (std::move (take));
+            }
+    }
     const std::lock_guard<std::mutex> lk (cacheLock);
     src.stretched = st;
     src.stretchedFactor = factor;

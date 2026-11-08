@@ -273,6 +273,15 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     layout.add (floatParam (ParamID::duckRelease, "Duck Release", skewedRange (20.0f, 3000.0f, 300.0f), 300.0f, "ms", ms, msIn));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::duckSidechain, 1 }, "Duck Sidechain", false));
 
+    // ---- split captures: the takes (TakeMode, same order) and the late block against the reflections
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamID::takeMode, 1 }, "Take Mode",
+                                                        StringArray { "Off", "Late", "Early + Late" }, 0));
+    layout.add (floatParam (ParamID::takeRate, "Take Rate", logRange (0.05f, 2.0f), 0.3f, "Hz",
+                            [] (float v, int) { return String (v, 2) + " Hz"; }, hzIn));
+    layout.add (floatParam (ParamID::lateOffset, "Late Offset",
+                            NormalisableRange<float> (-kMaxLateOffsetMs, kMaxLateOffsetMs, 0.0f, 0.5f, true), 0.0f, "ms",
+                            [] (float v, int) { return formatOffsetMs (v); }, msIn));
+
     // ---- post EQ
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::eqOn, 1 }, "EQ On", true));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamID::eqHpOn, 1 }, "EQ HP On", false));
@@ -334,7 +343,8 @@ ParamGroup groupOf (const String& id)
         { ParamID::delayTime, G::Delay }, { ParamID::delaySync, G::Delay }, { ParamID::delayNote, G::Delay },
         { ParamID::delayLevel, G::Delay },
         { ParamID::modMode, G::Modulation }, { ParamID::modDepth, G::Modulation }, { ParamID::modRate, G::Modulation },
-        { ParamID::smooth, G::Modulation },
+        { ParamID::smooth, G::Modulation }, { ParamID::takeMode, G::Modulation }, { ParamID::takeRate, G::Modulation },
+        { ParamID::lateOffset, G::Predelay },
         { ParamID::duckAmount, G::Ducker }, { ParamID::duckThreshold, G::Ducker }, { ParamID::duckRelease, G::Ducker },
         { ParamID::duckSidechain, G::Ducker },
         { ParamID::directHighs, G::Space }, { ParamID::directAir, G::Space }, { ParamID::directWidth, G::Space },
@@ -373,7 +383,8 @@ bool isIRParameter (const String& id)
         ParamID::decayMode, ParamID::early, ParamID::late, ParamID::vlf, ParamID::erRolloff, ParamID::lateRolloff,
         ParamID::erPattern, ParamID::delayTime, ParamID::delaySync, ParamID::delayNote,
         ParamID::delayLevel, ParamID::lowFreq, ParamID::lowMult, ParamID::highFreq, ParamID::highMult,
-        ParamID::smooth, ParamID::hallOn, ParamID::hallVolume, ParamID::hallAbsorption
+        ParamID::smooth, ParamID::hallOn, ParamID::hallVolume, ParamID::hallAbsorption, ParamID::takeMode,
+        ParamID::lateOffset
     };
     return irParams.contains (id);
 }

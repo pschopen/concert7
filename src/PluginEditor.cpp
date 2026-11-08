@@ -26,14 +26,16 @@ namespace
         constexpr int hallColumn (int i) { return hallX + 10 + i * knobW; }
         constexpr int dieColumn (int i) { return dryX + 10 + i * dieW; }
     }
-    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS", "SPACE" };
+    const char* const kTabNames[] = { "REVERB", "DECAY", "EQ", "EXTRAS", "SPACE", "TAKES" };
     const char* const kTabTooltips[] = {
         "Early reflections, late reverb, delay, start of the impulse response and stereo propagation",
         "Decay time of the lows and highs, separately",
         "Equalizer for the reverb signal (the dry signal is not affected)",
         "Movement in the reverb (modulation), Smooth and ducking",
         "Set the reverb by hall size, place a dry source nearer or further away, "
-        "and the tone, width and timing of the dry signal"
+        "and the tone, width and timing of the dry signal",
+        "LS library only: the several takes of a preset (the reverb keeps changing between them, as the hardware "
+        "does) and the late reverb moved against the early reflections"
     };
 
     /** What a control does, for the end user. Knobs, toggles and combo boxes are looked up by their parameter. */
@@ -104,6 +106,15 @@ namespace
                                 "DRIFT needs about twice the CPU." },
             { ParamID::modDepth, "Amount of movement in the reverb: livelier, less static. 0 = off." },
             { ParamID::modRate, "Speed of the modulation." },
+            // takes (split captures)
+            { ParamID::takeMode, "The LS library has several takes of every preset. LATE: the late reverb fades from "
+                                 "take to take, so it keeps changing its fine structure like the hardware does (where "
+                                 "the takes differ: the second banks). EARLY + LATE: the early reflections too (their "
+                                 "takes differ only slightly). OFF: take 1, as recorded. Replaces DRIFT; "
+                                 "every take needs the CPU of the late reverb." },
+            { ParamID::takeRate, "How many takes per second the reverb moves through." },
+            { ParamID::lateOffset, "Moves the late reverb against the early reflections, up to 200 ms either way. "
+                                   "Negative: the late reverb starts earlier, at most until its first sound." },
             { ParamID::smooth, "Evens out ringing frequencies and bumps in the tail. "
                                "Helps when a preset rings or flutters at long decay times." },
             { ParamID::duckAmount, "How far the reverb is lowered while the signal plays; it comes back in the pauses. "
@@ -369,6 +380,20 @@ MainPanel::MainPanel (Concert7Processor& p)
     hallDecayLabel.setTooltip ("The decay this hall gives. While HALL is on, DECAY follows it.");
     dst.addAndMakeVisible (hallDecayLabel);
 
+    // takes page (split captures): the tab shows only while the LS library is in use
+    auto& tks = pages[kTakesTab];
+    takeMode = std::make_unique<ParamCombo> (state, ParamID::takeMode);
+    takeMode->setTooltip (tooltipFor (ParamID::takeMode));
+    tks.addAndMakeVisible (*takeMode);
+    addKnob (knobs, tks, ParamID::takeRate, "RATE");
+    addKnob (knobs, tks, ParamID::lateOffset, "LATE OFFSET", true);
+    takesInUse.setFont (uiFont (13.0f));
+    takesInUse.setJustificationType (Justification::centred);
+    takesInUse.setColour (Label::textColourId, Colours::lcdOn);
+    takesInUse.setTooltip ("The takes the reverb moves through: the early reflections and the late reverb, each "
+                           "where its takes differ from the first.");
+    tks.addAndMakeVisible (takesInUse);
+
     tabButtons[0].setToggleState (true, dontSendNotification);
     showTab (0);
 
@@ -542,6 +567,10 @@ void MainPanel::updateLibraryButtons()
     samButton.setToggleState (library == IROrigin::Combined, dontSendNotification);
     lsButton.setToggleState (library == IROrigin::Split, dontSendNotification);
     otherButton.setToggleState (library == IROrigin::User, dontSendNotification);
+    // the takes are those of split captures
+    tabButtons[(size_t) kTakesTab].setVisible (library == IROrigin::Split);
+    if (library != IROrigin::Split && currentTab == kTakesTab)
+        showTab (0);
 }
 
 void MainPanel::chooseLibrary (IROrigin library)
@@ -784,6 +813,22 @@ void MainPanel::timerCallback()
         display.setIR (ir);
         decayView.setIR (ir);
     }
+    if (currentTab == kTakesTab)
+    {
+        // the takes in use: the response's own and the ones it moves through
+        String text ("OFF");
+        if (roundToInt (state.getRawParameterValue (ParamID::takeMode)->load()) != (int) TakeMode::Off)
+        {
+            auto takes = [] (size_t others, const char* alike) {
+                return others > 0 ? String ((int) others + 1) + " TAKES" : String (alike);
+            };
+            const bool early = roundToInt (state.getRawParameterValue (ParamID::takeMode)->load()) == (int) TakeMode::EarlyAndLate;
+            text = "EARLY  " + (early ? takes (ir != nullptr ? ir->earlyTakes.size() : 0, "1 TAKE") : String ("TAKE 1"))
+                 + "\nLATE  " + takes (ir != nullptr ? ir->lateTakes.size() : 0, "TAKES ALIKE");
+        }
+        if (takesInUse.getText() != text)
+            takesInUse.setText (text, dontSendNotification);
+    }
     if (lastTouched != nullptr)
     {
         auto* p = state.getParameter (lastTouched->getParamID());
@@ -1012,6 +1057,18 @@ void MainPanel::paint (Graphics& g)
         g.setFont (uiFont (11.0f));
         g.drawText ("-" + String (red, 1) + " dB", gr.reduced (6.0f), Justification::bottomLeft);
     }
+    else if (currentTab == kTakesTab)
+    {
+        auto& tks = pages[kTakesTab];
+        frame (tks, { 8, 8, 240, 180 }, "TAKES");
+        frame (tks, { 256, 8, 240, 180 }, "IN USE");
+        frame (tks, { 504, 8, 196, 180 }, "LATE REVERB");
+        const auto lcd = takesInUse.getBounds().toFloat() + tks.getPosition().toFloat();
+        g.setColour (Colours::lcdBack);
+        g.fillRoundedRectangle (lcd, 5.0f);
+        g.setColour (Colours::outline);
+        g.drawRoundedRectangle (lcd.reduced (0.5f), 5.0f, 1.0f);
+    }
     else if (currentTab == kSpaceTab)
     {
         using namespace SpaceGrid;
@@ -1184,6 +1241,13 @@ void MainPanel::resized()
     small (ext, ParamID::duckRelease, { 474, 34, 100, 130 });
     small (ext, ParamID::smooth, { 789, 34, 100, 130 });
     duckSidechain->setBounds (600, 160 - 8, 110, 24);
+
+    // takes page
+    auto& tks = pages[kTakesTab];
+    takeMode->setBounds (24, 30, 208, 24);
+    small (tks, ParamID::takeRate, { 78, 62, 100, 116 });
+    takesInUse.setBounds (276, 40, 200, 120);
+    small (tks, ParamID::lateOffset, { 554, 34, 96, 130 });
 
     // space page (see SpaceGrid): HALL is size and absorption, below it the DECAY they give. DISTANCE is the
     // main knob, its two options (off at the start of the knob) beside it. The DRY SIGNAL it sets: tone on top,

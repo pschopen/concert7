@@ -179,7 +179,8 @@ double Concert7Processor::getTailLengthSeconds() const
 }
 
 //==============================================================================
-void Concert7Processor::convolve (const float* inL, const float* inR, const WetStreams& out, int n, bool crossfeed)
+void Concert7Processor::convolve (const float* inL, const float* inR, const WetStreams& out, int n, bool crossfeed,
+                                  double takesPerSecond)
 {
     // a pause of the input longer than the reverb pauses the convolution
     const auto range = FloatVectorOperations::findMinAndMax (inL, n).getUnionWith (FloatVectorOperations::findMinAndMax (inR, n));
@@ -211,7 +212,7 @@ void Concert7Processor::convolve (const float* inL, const float* inR, const WetS
     else
     {
         convolutionPaused = false;
-        engine.process (l, r, target, len, crossfeed);
+        engine.process (l, r, target, len, crossfeed, takesPerSecond);
     }
 
     if (underSamplingActive.load())
@@ -305,6 +306,8 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
     WetStreams streams;
     streams.ch = { wetL, wetR, wetLate.getWritePointer (0), wetLate.getWritePointer (1),
                    wetLate.getWritePointer (2), wetLate.getWritePointer (3) };
+    // split captures: how fast the convolution moves through their takes
+    const double takesPerSecond = roundToInt (param (ParamID::takeMode)) != (int) TakeMode::Off ? param (ParamID::takeRate) : 0.0;
 
     if (lowCpuActive.load())
     {
@@ -331,20 +334,21 @@ void Concert7Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
                 for (size_t i = 0; i < out.ch.size(); ++i)
                     out.ch[i] = chunkOut.getWritePointer ((int) i);
                 convolve (chunkIn.getReadPointer (0), chunkIn.getReadPointer (1), out, kLowCpuBlock,
-                          crossfeed != Crossfeed::NoCrossfeed);
+                          crossfeed != Crossfeed::NoCrossfeed, takesPerSecond);
                 chunkPos = 0;
             }
         }
     }
     else
     {
-        convolve (sendL, sendR, streams, n, crossfeed != Crossfeed::NoCrossfeed);
+        convolve (sendL, sendR, streams, n, crossfeed != Crossfeed::NoCrossfeed, takesPerSecond);
     }
 
     // modulation: Vibrato moves the whole reverb, the other modes only the late reverb (split off in the IR)
     const auto modMode = (ModMode) roundToInt (param (ParamID::modMode));
     const float modDepth = param (ParamID::modDepth), modRate = param (ParamID::modRate);
-    const bool drift = modMode == ModMode::Drift || modMode == ModMode::DriftChorus;
+    // Drift turns the late reverb towards its variant; a late reverb that moves through its takes has none
+    const bool drift = (modMode == ModMode::Drift || modMode == ModMode::DriftChorus) && ! irLateTakes.load();
     const float chorus = modMode == ModMode::Chorus ? modDepth : (modMode == ModMode::DriftChorus ? 0.5f * modDepth : 0.0f);
     tailModulator.process (wetL, wetR, streams.l (1), streams.r (1), streams.l (2), streams.r (2), n,
                            drift ? modDepth : 0.0f, chorus, modRate);
@@ -545,6 +549,13 @@ DesignParams Concert7Processor::readDesignParams() const
     const int layout = lateLayout();
     d.splitLate = layout >= 1;
     d.lateVariant = layout >= 2;
+    // split captures: their takes (as responses of their own, so the late reverb is split off) and the late offset
+    if (getLibrary() == IROrigin::Split)
+    {
+        d.takes = (TakeMode) jlimit (0, (int) TakeMode::EarlyAndLate, roundToInt (param (ParamID::takeMode)));
+        d.lateOffsetMs = param (ParamID::lateOffset);
+        d.splitLate = d.splitLate || d.takes != TakeMode::Off;
+    }
     return d;
 }
 
@@ -691,6 +702,16 @@ void Concert7Processor::buildNow()
 
     // ---- parameters
     auto dp = readDesignParams();
+
+    // the other takes of split captures, the first time they are needed
+    if (dp.takes != TakeMode::Off && source->hasBlocks() && ! source->takesLoaded)
+    {
+        IRPreset preset;
+        String error;
+        setStatusMessage ("Loading takes...", true);
+        if (shared->getPreset (id, preset))
+            loadSourceTakes (preset, *source, error);
+    }
     // a newly selected preset starts at its own decay time (the hall model keeps its own)
     const bool presetChanged = userPresetChange.exchange (false);
     if (presetChanged && ! shared->isKept (ParamGroup::Decay) && ! isHallOn())
@@ -721,7 +742,10 @@ void Concert7Processor::buildNow()
             // halving and doubling the rate delays by HalfbandFilter::kDelay: start the response that much earlier
             auto trimmed = std::make_shared<BuiltIR> (*built);
             constexpr int cut = HalfbandFilter::kDelay / 2;
-            for (auto* set : { &trimmed->ch, &trimmed->late, &trimmed->variant })
+            std::vector<std::array<std::vector<float>, 4>*> sets { &trimmed->ch, &trimmed->late, &trimmed->variant };
+            for (auto* takes : { &trimmed->earlyTakes, &trimmed->lateTakes })
+                for (auto& take : *takes) sets.push_back (&take);
+            for (auto* set : sets)
                 for (auto& c : *set)
                     if (! c.empty())
                         c.erase (c.begin(), c.begin() + std::min ((int) c.size() - 1, cut));
@@ -742,6 +766,7 @@ void Concert7Processor::buildNow()
     irMidEnergy = built->midEnergy;
     irMidEnergyDiagonal = built->midEnergyDiagonal;
     irOnsetMs = built->onsetMs;
+    irLateTakes = ! built->lateTakes.empty();
     lastBuiltParams = dp;
     lastBuiltPreset = id;
     lastBuiltPattern = patternId;

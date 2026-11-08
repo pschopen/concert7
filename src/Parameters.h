@@ -50,6 +50,11 @@ namespace ParamID
     inline constexpr const char* duckRelease   = "duckRelease";
     inline constexpr const char* duckSidechain = "duckSidechain";
 
+    // split captures (the LS library): their takes and the late block's offset
+    inline constexpr const char* takeMode      = "takeMode";
+    inline constexpr const char* takeRate      = "takeRate";
+    inline constexpr const char* lateOffset    = "lateOffset";
+
     // post EQ
     inline constexpr const char* eqOn          = "eqOn";
     inline constexpr const char* eqHpOn        = "eqHpOn";
@@ -92,6 +97,7 @@ inline constexpr float kDelayOffDb      = -21.0f;   // delay voices
 inline constexpr float kRolloffBypassHz = 20000.0f; // roll-off at or above is bypassed
 inline constexpr int   kNumErPatterns   = 32;
 inline constexpr float kMaxOffsetMs     = 5000.0f;  // irOffset: +-5 s
+inline constexpr float kMaxLateOffsetMs = 200.0f;   // lateOffset: +-200 ms
 
 enum class Crossfeed { TrueStereo = 0, NoCrossfeed, MonoIn };
 

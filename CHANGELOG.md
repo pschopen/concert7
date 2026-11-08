@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- LS presets: a TAKES tab (shown only for the LS library). The late reverb, or the early reflections too, moves
+  through the eight takes of the preset like the hardware's modulation: every take is convolved and neighbours fade
+  into each other at the same level (equal power for independent takes, nearly equal gain for the much alike
+  reflections). LATE OFFSET moves the late block against the reflections by ±200 ms, earlier at most until its
+  first sound. Off when a preset is chosen; the takes are loaded the first time they are used (in parallel)
 - Three libraries: SAM / LS / OTHER above the categories. SAM and LS are two M7 libraries Concert7 is tested
   with (the setup links to them): one with a response per preset, one with the early reflections and the late
   reverb recorded on their own (also the M7's second banks Halls 2, Plates 2, Rooms 2, Spaces 2, and Nonlin).

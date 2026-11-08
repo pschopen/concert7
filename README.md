@@ -73,6 +73,14 @@ late reverb and the reflections stay as they are (as on the M7); EARLY / LATE, t
 work on the real blocks. Where the takes have a fine structure of their own (the second banks), the Drift
 modulation uses take 2 instead of a synthesised variant.
 
+**TAKES tab** (LS only): each preset was recorded eight times. TAKES = LATE lets the late reverb fade from take to
+take (RATE: takes per second), so it keeps changing as the hardware does; EARLY + LATE moves the reflections too.
+Where the late reverbs of the takes are copies of each other (the first banks), only the reflections move – their
+takes differ slightly in every bank. Every take is convolved all the time, so each needs the CPU of the late reverb
+(LATE about 8×, EARLY + LATE more; Low CPU helps with small buffers); Drift has nothing to do while the takes move
+the late reverb. LATE OFFSET moves the late block against the reflections by up to ±200 ms, earlier at most until
+its first sound. All of it is off when a preset is chosen.
+
 **User presets** (BROWSE → SAVE AS...) store the whole sound – impulse response and every setting – as
 `.c7preset` files in the `Presets` folder next to the library folder (BROWSE → FOLDER). They can be copied between
 computers; one whose impulse response is missing loads with the first preset and says so.
@@ -105,6 +113,7 @@ from an M7 library (the one in use, for OTHER the SAM library if it is there).
 | Post EQ | high pass 12 dB, low shelf/bell, mid bell, high shelf/bell, high cut 12 dB, interactive curve |
 | Propagation | True Stereo, No Crossfeed (L→L / R→R), Mono In |
 | Modulation | four modes with depth / rate (EXTRAS tab): Vibrato (pitch of the whole reverb), Chorus (pitch of the late reverb, decorrelated left / right), Drift (most natural, the default: the late reverb keeps changing its fine structure, no pitch change), Drift + Chorus; early reflections stay untouched except in Vibrato |
+| Takes | LS only: OFF / LATE / EARLY + LATE moves through the preset's eight takes, rate; late offset ±200 ms (TAKES tab) |
 | Smooth | 0 – 100 %, evens out resonances, ringing and bumps in the decay of the late reverb (EXTRAS tab) |
 | Space | hall model: volume (m³) and absorption (stone church … studio) set the decay (Eyring); distance: places a dry source 0.5 – 60 m away – direct to reverberant ratio, presence, air absorption, gap before the first reflection, optional source width and time alignment (SPACE tab) |
 | Direct | tone (HIGHS shelf, AIR absorption), WIDTH and DELAY of the dry signal, REVERB GAP of the whole reverb against it – by hand or set by the distance mode (SPACE tab, below the distance controls) |
@@ -177,7 +186,8 @@ parameter changes (`src/dsp/IRDesigner.cpp`):
    part + late reverb = the whole response), so it can move while the early reflections stay put. Drift adds a
    **variant** of the late reverb: every STFT frame gets new random phases (the same for all four channels, so the
    stereo relation stays), and a 10 ms energy match keeps its envelope – same decay, same spectrum, independent
-   fine structure.
+   fine structure. The takes of split captures (TAKES tab) are assembled like the first, each as a response of
+   its own.
 
 **Modulation** (`TailModulator` in `src/dsp/PostProcessing.cpp`) runs on the convolver outputs. Drift turns the late
 reverb between itself and its variant, `cos θ · late + sin θ · variant` with θ following a smooth random curve
@@ -186,6 +196,12 @@ image moves, nothing wavers in pitch. Chorus delays the late reverb by 1 … 4 m
 independently left and right (at 100 % and 0.5 Hz up to about 5 cents). Drift + Chorus uses both, the chorus at half depth.
 Vibrato is the sine vibrato on the whole reverb of 0.1.x; projects saved before the modes keep it. Drift convolves
 the late reverb twice and needs about twice the CPU; at depth 0 and in Vibrato the response is not split at all.
+
+**Takes** (`TrueStereoConvolver` in `src/dsp/ConvolutionEngine.cpp`): with TAKES on, every take runs in convolvers of
+its own and the outputs are mixed in a sequence (take 1 → 2 → … → 1). Neighbours fade with a smooth curve whose
+weights are normalised by the correlation of the two takes, `(a, b) / √(a² + b² + 2abρ)`: independent late reverbs
+fade with equal power, the much alike reflections with nearly equal gain, so the level stays either way. The
+position in the sequence belongs to the engine, so a new response (a turned knob) takes over at the same place.
 
 **SPACE tab** (`src/dsp/Distance.cpp`): two optional ways to set Concert7 in terms of a real hall. Both start from
 the current sound when switched on, and while off their greyed knobs show the values that match it.
