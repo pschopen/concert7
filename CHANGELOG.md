@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.2.0-beta
+
+### Overview
+
+- **Three libraries** – SAM / LS / OTHER: two M7 libraries Concert7 is tested with (one of them with early
+  reflections and late reverb recorded on their own, used as real blocks) and any other impulse responses
+- **TAKES tab** (LS): the late reverb, or the reflections too, moves through the preset's eight takes; late offset
+- **Decay** follows room acoustics, with five decay modes, a continued tail that is real noise and the M7's level
+  behaviour; a preset just loaded is the recording itself
+- **User presets** with a browser (search, favourites, tags), groups kept when changing presets, undo / redo,
+  A/B comparison, typed values, tooltips on every control
+- **Modulation** modes (Drift, Chorus, Drift + Chorus, Vibrato), **Smooth**, **Offset**
+- **SPACE tab**: hall model (volume, absorption), calibrated source distance, dry signal controls
+- **CPU**: Low CPU mode, half rate convolution at high sample rates, pause on silence; same level at every
+  sample rate
+
+### Details
 
 - LS presets: a TAKES tab (shown only for the LS library). The late reverb, or the early reflections too, moves
   through the eight takes of the preset like the hardware's modulation: every take is convolved and neighbours fade
