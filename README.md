@@ -36,7 +36,7 @@ Concert7 stands on the shoulders of two open source projects, and we are very gr
   presets, undo / redo, A/B, typed values, tooltips, scalable UI, English / German setup
 - **Zero latency**; Low CPU mode, half rate convolution at high sample rates, pause on silence
 
-How it all works is described in the [documentation](https://concert7.github.io/docs/), every change in
+Every control is described in the [documentation](https://concert7.github.io/docs/), every change in
 `CHANGELOG.md`.
 
 ## Download and installation
