@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: macOS, os: macos-14, cmake_args: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"' }
+          - { name: macOS, os: macos-15, cmake_args: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"' }
           - { name: Windows, os: windows-2022, cmake_args: '' }
           - { name: Linux, os: ubuntu-22.04, cmake_args: '' }
 

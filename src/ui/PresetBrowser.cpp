@@ -531,7 +531,8 @@ void PresetBrowser::showEditPanel (int mode)
             return;
         }
         // the panel goes after this callback: it is the one running it
-        MessageManager::callAsync ([safe = SafePointer<PresetBrowser> (this)] {
+        SafePointer<PresetBrowser> safe (this);
+        MessageManager::callAsync ([safe] {
             if (safe == nullptr) return;
             safe->editPanel.reset();
             safe->refresh();
