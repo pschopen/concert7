@@ -313,7 +313,7 @@ public:
             auto ch = syntheticIR (2.0f, 2.4f, sr, 9);
             for (auto& c : ch)
                 for (size_t n = (size_t) (2.1 * sr); n < c.size(); ++n)
-                    c[n] *= Decibels::decibelsToGain (-3.0f * (float) std::min (1.0, (n / sr - 2.1) / 0.1));
+                    c[n] *= Decibels::decibelsToGain (-3.0f * (float) std::min (1.0, ((double) n / sr - 2.1) / 0.1));
             auto fading = makeSourceIR (ch, true, sr, sr, "fading");
             DesignParams p;
             p.decay = fading->nativeRT * 3.0f;
@@ -332,7 +332,8 @@ public:
             }
             double st = 0, sd = 0, stt = 0, std_ = 0;
             for (size_t i = 0; i < t.size(); ++i) { st += t[i]; sd += db[i]; stt += t[i] * t[i]; std_ += t[i] * db[i]; }
-            const double k = (t.size() * std_ - st * sd) / (t.size() * stt - st * st), c0 = (sd - k * st) / t.size();
+            const double count = (double) t.size();
+            const double k = (count * std_ - st * sd) / (count * stt - st * st), c0 = (sd - k * st) / count;
             double worst = 0.0;
             for (size_t i = 1; i + 1 < t.size(); ++i) // 300 ms average: the dip, not the noise
                 worst = std::max (worst, std::abs ((db[i - 1] + db[i] + db[i + 1]) / 3.0 - (c0 + k * t[i])));
@@ -529,9 +530,166 @@ public:
                     line << " " << String (fc, 0) << " Hz " << String (bass, 1);
                     if (factor > 1.0f) expectLessThan (bass, 3.5f, String (fc) + " Hz grows more than DECAY");
                     else               expectGreaterThan (bass, -3.5f, String (fc) + " Hz shrinks more than DECAY");
+                    // and the other way round: the shape of the decay stretched with it (moved by a straight line in dB
+                    // the long bass would stay up to 5 dB too long when it is shortened)
+                    if (isDecayShapeEnabled())
+                        expectLessThan (std::abs (bass), 4.0f, String (fc) + " Hz against the stretched recording");
                 }
                 logMessage (line + " dB");
             }
+        }
+
+        // a decay with two slopes (a fast one, a slow one 20 dB lower that takes over later); times x gives the same
+        // room with every decay x times as long
+        auto twoSlopeIR = [&] (float x, double rate) {
+            auto ch = syntheticIR (0.7f * x, 3.0f * x, rate, 23);
+            const auto slow = syntheticIR (2.4f * x, 3.0f * x, rate, 24);
+            for (size_t c = 0; c < 4; ++c)
+                for (size_t i = 0; i < ch[c].size(); ++i) ch[c][i] += 0.1f * slow[c][i];
+            return ch;
+        };
+
+        beginTest ("the shape of a decay: none in an exponential one, the bend of two slopes");
+        {
+            // exponential decays of every length, at every rate: the level only scatters around its line
+            int shaped = 0, total = 0;
+            for (double rate : { 44100.0, 48000.0, 96000.0 })
+                for (int seed = 1; seed <= 6; ++seed)
+                    for (float rt : { 0.4f, 1.0f, 2.2f, 4.5f })
+                    {
+                        auto exp = makeSourceIR (syntheticIR (rt, std::max (1.5f, rt * 1.6f), rate, 100 + seed), seed % 2 == 0,
+                                                 rate, rate, "exponential");
+                        for (auto& d : exp->bandShapeDb) shaped += d.empty() ? 0 : 1;
+                        total += (int) exp->bandShapeDb.size();
+                    }
+            expectEquals (shaped, 0, "bands of exponential decays with a shape (of " + String (total) + ")");
+
+            // two slopes: the level of the mid bands is the sum of two exponentials, without its straight line
+            auto two = makeSourceIR (twoSlopeIR (1.0f, sr), true, sr, sr, "two slopes");
+            const int hop = 512;
+            float worst = 0.0f, largest = 0.0f, overstated = 0.0f;
+            bool turned = false;
+            for (size_t b = 0; b < two->bandFreq.size(); ++b)
+            {
+                if (two->bandFreq[b] < 400.0f || two->bandFreq[b] > 5000.0f) continue;
+                const auto& d = two->bandShapeDb[b];
+                expect (! d.empty(), String (two->bandFreq[b]) + " Hz has a shape");
+                if (d.empty()) continue;
+                // the range of the shape (from the start of the late reverb to the end of the valid range), and the known
+                // curve there without its own straight line
+                const int a = (int) std::lround ((two->onset + 0.06 * sr) / hop);
+                const int e = (int) std::lround ((two->onset + two->bandValidEnd[b] * sr) / hop);
+                std::vector<float> curve;
+                for (int m = a; m <= e; ++m)
+                {
+                    const double tau = (m * hop - two->onset) / sr;
+                    curve.push_back ((float) (10.0 * std::log10 (std::exp (-2.0 * std::log (1000.0) * tau / 0.7)
+                                                                 + 0.01 * std::exp (-2.0 * std::log (1000.0) * tau / 2.4))));
+                }
+                double sx = 0, sy = 0, sxx = 0, sxy = 0;
+                const double n = (double) curve.size();
+                for (size_t j = 0; j < curve.size(); ++j)
+                {
+                    const double x = (double) j;
+                    sx += x; sy += curve[j]; sxx += x * x; sxy += x * curve[j];
+                }
+                const double slope = (n * sxy - sx * sy) / (n * sxx - sx * sx), icept = (sy - slope * sx) / n;
+                // Compared up to the fade towards the line at the end. Where the bend is large (the fast start) it is
+                // found (the level itself is smoothed over a few frames there); elsewhere the shape may be smaller (within
+                // the scatter of the level it is 0), but it never overstates the bend or turns it round.
+                for (size_t j = 0; j < curve.size() * 5 / 8; ++j)
+                {
+                    const float expected = curve[j] - (float) (icept + slope * (double) j), found = d[(size_t) a + j];
+                    largest = std::max (largest, std::abs (expected));
+                    if (std::abs (expected) > 4.0f)
+                        worst = std::max (worst, std::abs (found - expected));
+                    overstated = std::max (overstated, std::abs (found) - std::abs (expected));
+                    turned = turned || (found * expected < 0.0f && std::abs (expected) > 1.5f && std::abs (found) > 0.5f);
+                }
+            }
+            logMessage ("  two slopes, mid bands: the bend of up to " + String (largest, 1) + " dB found within " + String (worst, 1)
+                        + " dB where it is above 4 dB, overstated by at most " + String (overstated, 1) + " dB");
+            expectLessThan (worst, 2.0f);
+            expectLessThan (overstated, 1.0f);
+            expect (! turned, "the shape has the sign of the bend");
+        }
+
+        beginTest ("DECAY stretches the shape of a decay in time: two slopes as in the room x times as large");
+        {
+            // the level of every band against that of the same room with all decays x times as long, from the designer's
+            // own analysis, without the mean, from 0.15 s on as long as the room's decay is valid and 50 dB above its end
+            // (validOf, factor: only as far as the recording the response is made of has a valid range, stretched)
+            auto shapeError = [&] (const BuiltIR& ir, const SourceIR& room, float lowHz, float highHz,
+                                   const SourceIR* validOf = nullptr, float factor = 1.0f) {
+                const auto built = makeSourceIR (ir.ch, true, sr, sr, "built");
+                const int hop = 512;
+                double sum = 0.0;
+                int bands = 0;
+                for (size_t b = 0; b < room.bandFreq.size(); ++b)
+                {
+                    if (room.bandFreq[b] < lowHz || room.bandFreq[b] > highHz) continue;
+                    const auto& ref = room.bandLevelDb[b];
+                    const auto& lo = built->bandLevelDb[b];
+                    const int m0 = (int) ((room.onset + 0.15 * sr) / hop);
+                    std::vector<double> dev;
+                    for (int m = m0; m < (int) ref.size(); ++m)
+                    {
+                        const int j = m + (built->onset - room.onset) / hop;
+                        const double end = validOf != nullptr ? factor * validOf->bandValidEnd[b] : room.bandValidEndRecorded[b];
+                        if ((m * hop - room.onset) / sr > end || ref[(size_t) m] < ref[(size_t) m0] - 50.0f
+                            || j >= (int) lo.size()) break;
+                        dev.push_back (lo[(size_t) j] - ref[(size_t) m]);
+                    }
+                    if (dev.size() < 8) continue;
+                    const double mean = std::accumulate (dev.begin(), dev.end(), 0.0) / (double) dev.size();
+                    double e = 0.0;
+                    for (double v : dev) e += (v - mean) * (v - mean);
+                    sum += std::sqrt (e / (double) dev.size());
+                    ++bands;
+                }
+                return bands > 0 ? (float) (sum / bands) : 0.0f;
+            };
+            auto two = makeSourceIR (twoSlopeIR (1.0f, sr), true, sr, sr, "two slopes");
+            const bool shapeOn = isDecayShapeEnabled(); // concert7-dev --no-shape: as up to 0.2.1-beta, nothing to check
+            if (! shapeOn)
+                logMessage ("  skipped (--no-shape)");
+            for (float factor : { 0.5f, 2.0f })
+            {
+                if (! shapeOn) break;
+                auto room = makeSourceIR (twoSlopeIR (factor, sr), true, sr, sr, "two slopes, stretched");
+                DesignParams p;
+                p.decay = two->nativeRT * factor;
+                p.decayMode = DecayMode::Proportional; // every band by the same factor, as in the stretched room
+                const auto shaped = designIR (*two, nullptr, p);
+                setDecayShapeEnabled (false);
+                const auto line = designIR (*two, nullptr, p);
+                setDecayShapeEnabled (shapeOn);
+                // over the valid range of the recording (stretched), and as far as the stretched room is valid (beyond the
+                // recording's valid range the synthesis follows the decay line, the second slope is not known there)
+                const float withShape = shapeError (*shaped, *room, 400.0f, 5000.0f, two.get(), factor);
+                const float withLine = shapeError (*line, *room, 400.0f, 5000.0f, two.get(), factor);
+                const float allShape = shapeError (*shaped, *room, 400.0f, 5000.0f);
+                const float allLine = shapeError (*line, *room, 400.0f, 5000.0f);
+                logMessage ("  x" + String (factor) + ": mid bands against the stretched room " + String (withShape, 2)
+                            + " dB RMS (moved by a straight line: " + String (withLine, 2) + " dB), as far as the room is valid "
+                            + String (allShape, 2) + " dB (" + String (allLine, 2) + " dB)");
+                expectLessThan (withShape, 1.5f, "x" + String (factor));
+                expectLessThan (withShape, 0.6f * withLine, "x" + String (factor) + " against the straight line");
+                expectLessThan (allShape, 0.8f * allLine, "x" + String (factor) + " against the straight line, as far as the room is valid");
+            }
+
+            // Smooth takes the shape out along with the bumps: at 100 % the response does not change
+            DesignParams p;
+            p.decay = two->nativeRT * 2.0f;
+            p.smooth = 1.0f;
+            const auto smoothed = designIR (*two, nullptr, p);
+            setDecayShapeEnabled (false);
+            const auto smoothedLine = designIR (*two, nullptr, p);
+            setDecayShapeEnabled (shapeOn);
+            bool same = smoothed->length() == smoothedLine->length();
+            for (size_t c = 0; c < 4 && same; ++c)
+                same = smoothed->ch[c] == smoothedLine->ch[c];
+            expect (same, "Smooth 100 %: the same response with and without the shape");
         }
 
         beginTest ("as on the M7, a longer decay is louder, its late reverb starts a little lower");

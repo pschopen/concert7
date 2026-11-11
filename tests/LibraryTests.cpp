@@ -258,7 +258,11 @@ public:
 
                 const float excess = maxRise (ir->ch, ir->trueStereo) - std::max (3.0f, nativeRise);
                 if (excess > worstExcess) { worstExcess = excess; worstPreset = p.id + " x" + String (factor); }
-                if (excess > 3.0f) ++jumps;
+                if (excess > 3.0f)
+                {
+                    ++jumps;
+                    logMessage ("  " + p.id + " x" + String (factor) + ": level jump +" + String (excess, 1) + " dB");
+                }
 
                 if (isExponential)
                 {

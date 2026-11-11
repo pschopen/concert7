@@ -11,6 +11,7 @@
 #include <future>
 #include <algorithm>
 #include <limits>
+#include <atomic>
 #include <mutex>
 #include <numeric>
 
@@ -55,9 +56,17 @@ namespace
     constexpr int64 kVariantSeed      = 0x7a11;
     constexpr double kOwnTakeCorrelation = 0.5; // split captures: a take below this correlation is a variant of its own
     constexpr double kSameTakeCorrelation = 0.9999; // ... reflections above it are the same as the first take's
+    constexpr float kShapeSmoothing   = 0.125f; // shape of a decay: smoothed over +- this share of the band's RT,
+    constexpr float kShapeMinSeconds  = 0.085f; // ... at least +- this
+    constexpr float kShapeNoiseSigmas = 3.0f;   // ... 0 within this many standard deviations of the smoothed level
+    constexpr float kMaxShapeDb       = 12.0f;  // ... at most this far from the decay line
+    constexpr int   kMinShapeFrames   = 8;      // ... only in bands with a valid range at least this long
+    constexpr float kMinShapeDb       = 1.0f;   // ... and a shape at least this large
     constexpr double kPi = MathConstants<double>::pi;
 
     int stftSizeFor (double sr) { return sr <= 50000.0 ? 2048 : (sr <= 100000.0 ? 4096 : 8192); }
+
+    std::atomic<bool> decayShapeEnabled { true };
 
     /** Short-time Fourier transform with a periodic Hann window and 75 % overlap.
         Frame m is centred on sample m * hop. */
@@ -670,6 +679,11 @@ void analyseSourceIR (SourceIR& src)
         src.bandLevelDb[b] = std::move (level);
     }
 
+    // bands with a decay of their own (the others take their reverb time from the neighbours)
+    std::vector<bool> ownRT (centres.size());
+    for (size_t b = 0; b < centres.size(); ++b)
+        ownRT[b] = std::isfinite (src.bandRT[b]);
+
     // fill gaps, smooth, clamp
     const float broadband = estimateRT (channels, sr);
     for (size_t b = 0; b < src.bandRT.size(); ++b)
@@ -744,6 +758,77 @@ void analyseSourceIR (SourceIR& src)
         while (validEnd > limit && std::abs (deviation (validEnd)) > kEndToleranceDb)
             --validEnd;
         src.bandValidEnd[b] = (float) ((validEnd * be.hop - src.onset) / sr);
+    }
+
+    // The shape of every band's decay: the slow deviation of its level from the decay line within the valid range
+    // (a faster start, a bend to a second slope). A room with more or less absorption keeps the shape of its decay,
+    // stretched in time, so DECAY stretches it too, instead of keeping it at its absolute time. Only the bend: the
+    // deviation without its own straight line (the slope belongs to the reverb times of the bins). Smoothed over a
+    // quarter of the reverb time (at least 170 ms), so the fine structure (echoes, beats) stays where it is. What lies
+    // within three times the scatter of the smoothed level counts as on the line, and so does a shape below 1 dB: a
+    // decay that is a straight line has no shape at all.
+    src.bandShapeDb.assign (centres.size(), {});
+    for (size_t b = 0; b < centres.size(); ++b)
+    {
+        const auto& level = src.bandLevelDb[b];
+        const int a = fitRange[b].first;
+        const int e = std::min ((int) level.size() - 1, (int) std::lround ((src.onset + src.bandValidEnd[b] * sr) / be.hop));
+        if (! ownRT[b] || e - a < kMinShapeFrames) continue;
+
+        const int n = e - a + 1;
+        std::vector<float> dev ((size_t) n);
+        for (int m = a; m <= e; ++m)
+        {
+            const float tau = (float) ((m * be.hop - src.onset) / sr);
+            dev[(size_t) (m - a)] = level[(size_t) m] - (src.bandIntercept[b] - 60.0f * tau / src.bandRT[b]);
+        }
+        const auto line = lineFit (dev, 0, n - 1);
+        for (int j = 0; j < n; ++j)
+            dev[(size_t) j] -= (float) (line.first + line.second * j);
+
+        const int w = (int) std::lround (std::max (kShapeSmoothing * src.bandRT[b], kShapeMinSeconds) / frameSeconds);
+        // a straight line through the window around every frame (also at the ends of the range, where a mean would
+        // flatten a steep start)
+        std::vector<float> smooth ((size_t) n), leverage ((size_t) n);
+        double scatter = 0.0;
+        for (int j = 0; j < n; ++j)
+        {
+            const int q0 = std::max (0, j - w), q1 = std::min (n - 1, j + w);
+            const auto local = lineFit (dev, q0, q1);
+            smooth[(size_t) j] = (float) (local.first + local.second * (j - q0));
+            scatter += (dev[(size_t) j] - smooth[(size_t) j]) * (dev[(size_t) j] - smooth[(size_t) j]);
+            // how much of the level's scatter the line keeps at j: 1 / count in the middle, up to 4 times that at an end
+            const double points = q1 - q0 + 1, fromMiddle = j - 0.5 * (q0 + q1);
+            leverage[(size_t) j] = (float) (1.0 / points + fromMiddle * fromMiddle * 12.0 / (points * (points * points - 1.0)));
+        }
+        // the scatter of the smoothed level: that of the level around it, with the leverage of the line, where every
+        // sixth frame is independent (the level is smoothed over 5 frames of 75 % overlap already)
+        const double levelScatter = std::sqrt (scatter / n);
+        auto thresholdAt = [&] (int j) {
+            return std::max (kEndToleranceDb, kShapeNoiseSigmas * (float) (levelScatter * std::sqrt (std::min (1.0, 6.0 * leverage[(size_t) j]))));
+        };
+
+        auto& shape = src.bandShapeDb[b];
+        shape.assign (level.size(), 0.0f);
+        const int fadeLen = std::min (n, 2 * w);
+        float largest = 0.0f;
+        for (int j = 0; j < n; ++j)
+        {
+            // within the threshold 0, above it continuous and soon close to the value (non-negative garrote)
+            const float v = smooth[(size_t) j], threshold = thresholdAt (j);
+            float d = std::abs (v) > threshold ? v - threshold * threshold / v : 0.0f;
+            d = jlimit (-kMaxShapeDb, kMaxShapeDb, d);
+            // towards the end of the range, where the synthesis carries on on the line, back to the line
+            if (j > n - 1 - fadeLen)
+                d *= (float) (0.5 - 0.5 * std::cos (kPi * (n - 1 - j) / fadeLen));
+            shape[(size_t) (a + j)] = d;
+            largest = std::max (largest, std::abs (d));
+        }
+        for (int m = 0; m < a; ++m)
+            shape[(size_t) m] = shape[(size_t) a];
+        // a shape this small is the noise of the level, not a bend of the decay
+        if (largest < kMinShapeDb)
+            shape.clear();
     }
 
     // colouration of the late reverb (for Smooth): mean level of every STFT bin over its valid late range with
@@ -1296,21 +1381,43 @@ bool loadSourceTakes (const IRPreset& preset, SourceIR& src, String& error)
 //==============================================================================
 namespace
 {
-/** designIR on src; the display compares with shown (the preset itself, src may be its stretched copy). */
-std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown, const SourceIR* pattern, const DesignParams& p)
+/** designIR on src, in named steps: the decay model of every STFT bin, the early part, the late reverb (the measured
+    part modified, the continuation synthesised), the assembly, then the data for the display and the parts for the
+    modulation. The display compares with shown (the preset itself, src may be its stretched copy). */
+class ResponseBuilder
 {
-    auto out = std::make_shared<BuiltIR>();
+public:
+    ResponseBuilder (const SourceIR& source, const SourceIR& shownSource, const SourceIR* patternSource,
+                     const DesignParams& params, BuiltIR& result)
+        : src (source), shown (shownSource), pattern (patternSource), p (params), out (result)
+    {
+    }
+
+    void build()
+    {
+        out.splitSeconds = splitSec;
+        planDecay();
+        buildEarly();
+        buildLate();
+        planAssembly();
+        for (int c : chans)
+            assemble (out.ch[(size_t) c], early[(size_t) c], gE, late[(size_t) c], gL);
+        measureMidEnergy();
+        fillDisplay();
+        if (p.splitLate)
+            splitForModulation();
+    }
+
+private:
+    const SourceIR& src;
+    const SourceIR& shown;
+    const SourceIR* pattern;
+    const DesignParams& p;
+    BuiltIR& out;
+
     const double sr = src.sampleRate;
     const int len = src.length();
-    out->sampleRate = sr;
-    out->trueStereo = src.trueStereo;
-    out->presetId = src.presetId;
-    out->name = src.name;
-    out->nativeRT = shown.nativeRT;
-    out->targetRT = p.decay;
     const int shift = (int) std::lround (p.offsetMs * 0.001 * src.sampleRate);
-    out->onsetMs = (float) (1000.0 * std::max (0, src.onset + shift) / src.sampleRate);
-    if (len <= 0) return out;
 
     const std::vector<int> chans = src.trueStereo ? std::vector<int> { 0, 1, 2, 3 } : std::vector<int> { 0, 3 };
     const bool blocks = src.hasBlocks();
@@ -1321,20 +1428,21 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
 
     // ---- early / late crossover
     const float splitSec = jlimit (0.015f, kSplitMaxSeconds, 0.25f * src.nativeRT);
-    out->splitSeconds = splitSec;
     const int fade = std::max (8, (int) (kSplitFadeSeconds * sr));
     const int splitA = src.onset + (int) (splitSec * sr) - fade / 2;
     const int splitB = splitA + fade;
-    auto earlyWeight = [&] (int n) -> float {
+
+    float earlyWeight (int n) const
+    {
         if (n < splitA) return 1.0f;
         if (n >= splitB) return 0.0f;
         return (float) (0.5 + 0.5 * std::cos (kPi * (n - splitA) / (double) fade));
-    };
+    }
 
     // ---- decay model of every STFT bin
     // Each bin keeps its own reverb time (a ringing frequency stays relatively longer); DECAY scales it.
     const float scale = p.decay / std::max (0.01f, src.nativeRT);
-    const DecayScaling decayScaling (src, p.decay, p.decayMode == DecayMode::Proportional);
+    const DecayScaling decayScaling { src, p.decay, p.decayMode == DecayMode::Proportional };
     const bool constantLevel = p.decayMode == DecayMode::ConstantLevel;
     const bool original = p.decayMode == DecayMode::Original;
 
@@ -1351,33 +1459,26 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     const float maxRT = std::max (0.05f, (float) (tailBudget / sr) * 60.0f / kTailDb);
 
     // target reverb time of a band (DecayMode::Original: every band by the same factor, without the bass limit)
-    auto bandTarget = [&] (size_t b) {
+    float bandTarget (size_t b) const
+    {
         const float f = src.bandFreq[b];
         return jlimit (0.05f, maxRT, (original ? src.bandRT[b] * scale : decayScaling (src.bandRT[b], f)) * decayMultiplier (f, p));
-    };
+    }
     const bool vlfOff = p.vlfDb <= kVlfOffDb + 0.01f;
     const bool neutralLate = std::abs (scale - 1.0f) < 0.005f && std::abs (p.lowMult - 1.0f) < 0.005f
                           && std::abs (p.highMult - 1.0f) < 0.005f && p.vlfDb >= -0.05f
                           && p.lateRolloffHz >= kRolloffBypassHz && p.smooth < 0.005f;
 
-    Stft stft (stftSizeFor (sr));
+    Stft stft { stftSizeFor (sr) };
     const int N = stft.N, hop = stft.hop, bins = stft.bins;
-    auto frameTime = [&] (int m) { return (float) ((m * hop - src.onset) / sr); };
-    std::vector<float> re ((size_t) bins), im ((size_t) bins);
-    std::vector<float> rtNat ((size_t) bins), rtTgt ((size_t) bins), slopeDb ((size_t) bins);
+    float frameTime (int m) const { return (float) ((m * hop - src.onset) / sr); }
+    // working memory of the STFT frames (the early part and the resynthesis)
+    std::vector<float> re = std::vector<float> ((size_t) bins), im = std::vector<float> ((size_t) bins);
+    // native and target reverb time of every bin and the gain slope between them (zero where the late part stays)
+    std::vector<float> rtNat = std::vector<float> ((size_t) bins), rtTgt = std::vector<float> ((size_t) bins),
+                       slopeDb = std::vector<float> ((size_t) bins);
     const bool perBin = (int) src.binRT.size() == bins;
     bool shorter = false;
-    for (int k = 0; k < bins && ! neutralLate; ++k)
-    {
-        const float f = std::max (1.0f, (float) (k * sr / N));
-        // DecayMode::Original: the third octave's decay for all its bins
-        const float rn = perBin && ! original ? src.binRT[(size_t) k] : interpLogFreq (src.bandFreq, src.bandRT, f);
-        const float rt = jlimit (0.05f, maxRT, (original ? rn * scale : decayScaling (rn, f)) * decayMultiplier (f, p));
-        rtNat[(size_t) k] = rn;
-        rtTgt[(size_t) k] = rt;
-        slopeDb[(size_t) k] = 60.0f * (1.0f / rn - 1.0f / rt);
-        shorter = shorter || (k > 0 && slopeDb[(size_t) k] < -0.01f && ! original); // Original: early part as it is
-    }
 
     // DECAY and level, as on the M7: the early reflections (a block of their own) keep their level, the late reverb
     // starts a little lower the longer it rings. In the split captures (both blocks at fixed levels) its start
@@ -1393,393 +1494,149 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     const bool measureLevel = constantLevel && ! neutralLate;
     const int rampLength = std::max (1, splitA - src.onset);
 
+    void planDecay()
+    {
+        for (int k = 0; k < bins && ! neutralLate; ++k)
+        {
+            const float f = std::max (1.0f, (float) (k * sr / N));
+            // DecayMode::Original: the third octave's decay for all its bins
+            const float rn = perBin && ! original ? src.binRT[(size_t) k] : interpLogFreq (src.bandFreq, src.bandRT, f);
+            const float rt = jlimit (0.05f, maxRT, (original ? rn * scale : decayScaling (rn, f)) * decayMultiplier (f, p));
+            rtNat[(size_t) k] = rn;
+            rtTgt[(size_t) k] = rt;
+            slopeDb[(size_t) k] = 60.0f * (1.0f / rn - 1.0f / rt);
+            shorter = shorter || (k > 0 && slopeDb[(size_t) k] < -0.01f && ! original); // Original: early part as it is
+        }
+    }
+
     // ---- early part (own or from the selected pattern). Recorded on its own (split captures) it is that block as it
     // is, the late reverb is the other block; otherwise it is cut out of the response at the crossover.
     std::array<std::vector<float>, 4> early;
-    const SourceIR& es = pattern != nullptr ? *pattern : src;
-    const bool earlyBlock = blocks && es.hasBlocks();
-    int earlyLen = std::max (0, splitB);
-    if (earlyBlock)
-    {
-        // up to the end of the reflections (the block is padded to the length of the response)
-        earlyLen = 1;
-        for (int c : chans)
-        {
-            const int esChan = ! es.trueStereo && (c == 1 || c == 2) ? -1 : c;
-            if (esChan < 0) continue;
-            std::vector<const std::array<std::vector<float>, 4>*> scanned { &es.earlyBlock };
-            if (earlyTakes)
-                for (const auto& take : src.earlyTakes) scanned.push_back (&take);
-            for (const auto* block : scanned)
-            {
-                const auto& x = (*block)[(size_t) esChan];
-                for (int n = (int) x.size(); n-- > earlyLen;)
-                    if (x[(size_t) n] != 0.0f) { earlyLen = n + 1; break; }
-            }
-        }
-        earlyLen = std::max (1, earlyLen - (pattern != nullptr ? pattern->onset - src.onset : 0));
-    }
-    for (int c : chans)
-    {
-        auto& e = early[(size_t) c];
-        e.assign ((size_t) earlyLen, 0.0f);
-        const int patternShift = pattern != nullptr ? pattern->onset - src.onset : 0;
-        int esChan = c;
-        if (! es.trueStereo && (c == 1 || c == 2)) esChan = -1;
-        if (esChan >= 0)
-        {
-            const auto& x = earlyBlock ? es.earlyBlock[(size_t) esChan] : es.ch[(size_t) esChan];
-            for (int n = 0; n < (int) e.size(); ++n)
-            {
-                const int idx = n + patternShift;
-                if (idx >= 0 && idx < (int) x.size())
-                    e[(size_t) n] = earlyBlock ? x[(size_t) idx] : x[(size_t) idx] * earlyWeight (n);
-            }
-        }
+    std::vector<std::array<std::vector<float>, 4>> earlyOfTake;
 
-        if (measureLevel)
-            earlyEnergyNative += midBandEnergy (e, sr);
-
-        // A shorter decay is a room that absorbs more: its early reflections fade with the same decay as the
-        // late reverb, from the onset on (otherwise they keep their level and the response drops at the
-        // crossover). A longer decay leaves them as they are. Reflections recorded on their own are a block of their
-        // own, as on the M7: the reverb time does not change them.
-        if (shorter && ! blocks && ! e.empty())
+    void buildEarly()
+    {
+        const SourceIR& es = pattern != nullptr ? *pattern : src;
+        const bool earlyBlock = blocks && es.hasBlocks();
+        int earlyLen = std::max (0, splitB);
+        if (earlyBlock)
         {
-            const int el = (int) e.size();
-            std::vector<float> y ((size_t) el, 0.0f), norm ((size_t) el, 0.0f);
-            for (int m = 0; m < stft.numFrames (el); ++m)
+            // up to the end of the reflections (the block is padded to the length of the response)
+            earlyLen = 1;
+            for (int c : chans)
             {
-                stft.forward (e.data(), el, m, re.data(), im.data());
-                const float t = std::max (0.0f, frameTime (m));
-                for (int k = 0; k < bins; ++k)
+                const int esChan = ! es.trueStereo && (c == 1 || c == 2) ? -1 : c;
+                if (esChan < 0) continue;
+                std::vector<const std::array<std::vector<float>, 4>*> scanned { &es.earlyBlock };
+                if (earlyTakes)
+                    for (const auto& take : src.earlyTakes) scanned.push_back (&take);
+                for (const auto* block : scanned)
                 {
-                    const float g = Decibels::decibelsToGain (std::min (0.0f, slopeDb[(size_t) k] * t), -400.0f);
-                    re[(size_t) k] *= g;
-                    im[(size_t) k] *= g;
+                    const auto& x = (*block)[(size_t) esChan];
+                    for (int n = (int) x.size(); n-- > earlyLen;)
+                        if (x[(size_t) n] != 0.0f) { earlyLen = n + 1; break; }
                 }
-                stft.inverseAccumulate (re.data(), im.data(), m, y.data(), norm.data(), el);
             }
-            for (int n = 0; n < el; ++n)
-                e[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
+            earlyLen = std::max (1, earlyLen - (pattern != nullptr ? pattern->onset - src.onset : 0));
         }
-        if (std::abs (lateLevelDb) > 1e-3f && ! blocks)
-            for (int n = std::max (0, src.onset); n < (int) e.size(); ++n)
-                e[(size_t) n] *= Decibels::decibelsToGain (lateLevelDb * std::min (1.0f, (float) (n - src.onset) / (float) rampLength));
-        if (measureLevel)
-            earlyEnergy += midBandEnergy (e, sr); // before the roll-off, which stays the user's
-        lowPassInPlace (e, sr, p.erRolloffHz);
-    }
-    // the other takes of the reflections, like the first (a block of their own: only the roll-off)
-    std::vector<std::array<std::vector<float>, 4>> earlyOfTake (earlyTakes ? src.earlyTakes.size() : 0);
-    for (size_t t = 0; t < earlyOfTake.size(); ++t)
         for (int c : chans)
         {
-            auto& e = earlyOfTake[t][(size_t) c];
+            auto& e = early[(size_t) c];
             e.assign ((size_t) earlyLen, 0.0f);
-            const auto& x = src.earlyTakes[t][(size_t) c];
-            std::copy (x.begin(), x.begin() + std::min (earlyLen, (int) x.size()), e.begin());
+            const int patternShift = pattern != nullptr ? pattern->onset - src.onset : 0;
+            int esChan = c;
+            if (! es.trueStereo && (c == 1 || c == 2)) esChan = -1;
+            if (esChan >= 0)
+            {
+                const auto& x = earlyBlock ? es.earlyBlock[(size_t) esChan] : es.ch[(size_t) esChan];
+                for (int n = 0; n < (int) e.size(); ++n)
+                {
+                    const int idx = n + patternShift;
+                    if (idx >= 0 && idx < (int) x.size())
+                        e[(size_t) n] = earlyBlock ? x[(size_t) idx] : x[(size_t) idx] * earlyWeight (n);
+                }
+            }
+
+            if (measureLevel)
+                earlyEnergyNative += midBandEnergy (e, sr);
+
+            // A shorter decay is a room that absorbs more: its early reflections fade with the same decay as the
+            // late reverb, from the onset on (otherwise they keep their level and the response drops at the
+            // crossover). A longer decay leaves them as they are. Reflections recorded on their own are a block of their
+            // own, as on the M7: the reverb time does not change them.
+            if (shorter && ! blocks && ! e.empty())
+            {
+                const int el = (int) e.size();
+                std::vector<float> y ((size_t) el, 0.0f), norm ((size_t) el, 0.0f);
+                for (int m = 0; m < stft.numFrames (el); ++m)
+                {
+                    stft.forward (e.data(), el, m, re.data(), im.data());
+                    const float t = std::max (0.0f, frameTime (m));
+                    for (int k = 0; k < bins; ++k)
+                    {
+                        const float g = Decibels::decibelsToGain (std::min (0.0f, slopeDb[(size_t) k] * t), -400.0f);
+                        re[(size_t) k] *= g;
+                        im[(size_t) k] *= g;
+                    }
+                    stft.inverseAccumulate (re.data(), im.data(), m, y.data(), norm.data(), el);
+                }
+                for (int n = 0; n < el; ++n)
+                    e[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
+            }
+            if (std::abs (lateLevelDb) > 1e-3f && ! blocks)
+                for (int n = std::max (0, src.onset); n < (int) e.size(); ++n)
+                    e[(size_t) n] *= Decibels::decibelsToGain (lateLevelDb * std::min (1.0f, (float) (n - src.onset) / (float) rampLength));
+            if (measureLevel)
+                earlyEnergy += midBandEnergy (e, sr); // before the roll-off, which stays the user's
             lowPassInPlace (e, sr, p.erRolloffHz);
         }
+        // the other takes of the reflections, like the first (a block of their own: only the roll-off)
+        earlyOfTake.resize (earlyTakes ? src.earlyTakes.size() : 0);
+        for (size_t t = 0; t < earlyOfTake.size(); ++t)
+            for (int c : chans)
+            {
+                auto& e = earlyOfTake[t][(size_t) c];
+                e.assign ((size_t) earlyLen, 0.0f);
+                const auto& x = src.earlyTakes[t][(size_t) c];
+                std::copy (x.begin(), x.begin() + std::min (earlyLen, (int) x.size()), e.begin());
+                lowPassInPlace (e, sr, p.erRolloffHz);
+            }
+    }
 
     // ---- late part (and the modulation's variant from another take, where the recording has one)
     std::array<std::vector<float>, 4> late, variantLate;
-    std::vector<std::array<std::vector<float>, 4>> lateOfTake (lateTakes ? src.lateTakes.size() : 0);
+    std::vector<std::array<std::vector<float>, 4>> lateOfTake;
     // the variant moves the late reverb where it has no takes of its own
     const bool lateVariant = p.lateVariant && ! lateTakes;
     const bool takeVariant = p.splitLate && lateVariant && src.hasLateTake();
-    auto lateInput = [&] (const std::array<std::vector<float>, 4>& from, int c, std::vector<float>& x) {
+
+    void lateInput (const std::array<std::vector<float>, 4>& from, int c, std::vector<float>& x) const
+    {
         x.assign ((size_t) len, 0.0f);
         if (blocks)
             std::copy (from[(size_t) c].begin(), from[(size_t) c].begin() + std::min (len, (int) from[(size_t) c].size()), x.begin());
         else
             for (int n = std::max (0, splitA); n < len; ++n)
                 x[(size_t) n] = from[(size_t) c][(size_t) n] * (1.0f - earlyWeight (n));
-    };
-    if (neutralLate)
-    {
-        for (int c : chans)
-        {
-            lateInput (blocks ? src.lateBlock : src.ch, c, late[(size_t) c]);
-            if (takeVariant)
-                lateInput (src.lateTake, c, variantLate[(size_t) c]);
-            for (size_t t = 0; t < lateOfTake.size(); ++t)
-                lateInput (src.lateTakes[t], c, lateOfTake[t][(size_t) c]);
-        }
     }
-    else
+
+    void buildLate()
     {
-        std::vector<float> staticAmp ((size_t) bins);
-        std::vector<int> validFrame ((size_t) bins);
-        // DecayMode::Original: the recording up to its floor or fade, also where it has left its decay line
-        const auto& validEnds = original && src.bandValidEndRecorded.size() == src.bandValidEnd.size()
-                                    ? src.bandValidEndRecorded : src.bandValidEnd;
-        const float vlfLin = vlfOff ? 0.0f : Decibels::decibelsToGain (p.vlfDb);
-        float tailSeconds = splitSec + 0.05f;
-        const int srcFrames = stft.numFrames (len);
-        const int lastFullFrame = std::max (1, (len - N / 2) / hop);
-
-        for (int k = 0; k < bins; ++k)
+        lateOfTake.resize (lateTakes ? src.lateTakes.size() : 0);
+        if (neutralLate)
         {
-            const float f = std::max (1.0f, (float) (k * sr / N));
-            const float wv = 1.0f / (1.0f + std::pow (f / kVlfCrossoverHz, 4.0f));
-            float amp = 1.0f + (vlfLin - 1.0f) * wv;
-            if (p.lateRolloffHz < kRolloffBypassHz)
-                amp /= std::sqrt (1.0f + std::pow (f / p.lateRolloffHz, 4.0f));
-            if (p.smooth > 0.0f && (size_t) k < src.binColourDb.size())
-                amp *= Decibels::decibelsToGain (-p.smooth * jlimit (-kSmoothBoostDb, kSmoothCutDb, src.binColourDb[(size_t) k]));
-            staticAmp[(size_t) k] = amp;
-
-            const float tv = interpLogFreq (src.bandFreq, validEnds, f);
-            validFrame[(size_t) k] = jlimit (1, lastFullFrame, (int) std::floor ((src.onset + tv * sr) / hop));
-
-            if (f >= 40.0f && f <= 16000.0f)
-                tailSeconds = std::max (tailSeconds, rtTgt[(size_t) k] * kTailDb / 60.0f);
+            for (int c : chans)
+            {
+                lateInput (blocks ? src.lateBlock : src.ch, c, late[(size_t) c]);
+                if (takeVariant)
+                    lateInput (src.lateTake, c, variantLate[(size_t) c]);
+                for (size_t t = 0; t < lateOfTake.size(); ++t)
+                    lateInput (src.lateTakes[t], c, lateOfTake[t][(size_t) c]);
+            }
+            return;
         }
 
-        // never beyond the budget, also where the reverb times were rounded up: the assembled response is not cut
-        const int lateLen = std::min ((int) (kMaxBuiltIRSeconds * sr),
-                                      src.onset + std::min ((int) (tailSeconds * sr), std::max (0, tailBudget)) + N);
-        const int outFrames = stft.numFrames (lateLen);
-        const int firstFrame = blocks ? 0 : std::max (0, (splitA - N / 2) / hop - 1);
-
-        // per band and frame: largest gain that keeps the level at most kCapMarginDb above the target line
-        const size_t numBands = src.bandFreq.size();
-        std::vector<std::pair<int, float>> binBand ((size_t) bins, { 0, 0.0f });
-        for (int k = 0; k < bins; ++k)
-        {
-            const float f = std::max (1.0f, (float) (k * sr / N));
-            auto it = std::upper_bound (src.bandFreq.begin(), src.bandFreq.end(), f);
-            const int i1 = jlimit (0, (int) numBands - 1, (int) (it - src.bandFreq.begin()));
-            const int i0 = std::max (0, i1 - 1);
-            float t = 0.0f;
-            if (i1 != i0 && f > src.bandFreq[(size_t) i0])
-                t = jlimit (0.0f, 1.0f, std::log (f / src.bandFreq[(size_t) i0]) / std::log (src.bandFreq[(size_t) i1] / src.bandFreq[(size_t) i0]));
-            binBand[(size_t) k] = { i0, i1 == i0 ? 0.0f : t };
-        }
-        const int capFrames = numBands > 0 && ! src.bandLevelDb.empty() ? (int) src.bandLevelDb[0].size() : 0;
-        std::vector<float> capDb ((size_t) capFrames * numBands, kMaxBoostDb);
-        for (size_t b = 0; b < numBands && capFrames > 0; ++b)
-        {
-            const float rtT = bandTarget (b);
-            for (int m = 0; m < capFrames; ++m)
-            {
-                const float tau = std::max (0.0f, (float) ((m * hop - src.onset) / sr));
-                const float target = src.bandIntercept[b] - 60.0f * tau / rtT + kCapMarginDb;
-                capDb[(size_t) m * numBands + b] = target - src.bandLevelDb[b][(size_t) m];
-            }
-        }
-        // Smooth: per band and frame, pull the measured level towards the fitted decay line (bumps, late echoes)
-        std::vector<float> smoothDb;
-        if (p.smooth > 0.0f && capFrames > 0)
-        {
-            smoothDb.assign ((size_t) capFrames * numBands, 0.0f);
-            for (size_t b = 0; b < numBands; ++b)
-            {
-                const int vb = jlimit (0, capFrames - 1, (int) std::floor ((src.onset + src.bandValidEnd[b] * sr) / hop));
-                for (int m = 0; m <= vb; ++m)
-                {
-                    const float tau = (float) ((m * hop - src.onset) / sr);
-                    const float ramp = jlimit (0.0f, 1.0f, (tau - splitSec) / kSmoothRampSeconds);
-                    const float line = src.bandIntercept[b] - 60.0f * tau / src.bandRT[b];
-                    smoothDb[(size_t) m * numBands + b] = p.smooth * ramp
-                        * jlimit (-kSmoothCutDb, kSmoothBoostDb, line - src.bandLevelDb[b][(size_t) m]);
-                }
-            }
-        }
-
-        auto gainAt = [&] (int m, int k) {
-            float db = std::min (kMaxBoostDb, slopeDb[(size_t) k] * std::max (0.0f, frameTime (m)));
-            if (! capDb.empty() && m < capFrames)
-            {
-                const auto& bw = binBand[(size_t) k];
-                const size_t i0 = (size_t) m * numBands + (size_t) bw.first;
-                const size_t i1 = (size_t) m * numBands + (size_t) std::min (bw.first + 1, (int) numBands - 1);
-                if (! smoothDb.empty())
-                    db += smoothDb[i0] * (1.0f - bw.second) + smoothDb[i1] * bw.second;
-                // never lift the measured band level above the target decay line (noise floor, fades)
-                const float cap = capDb[i0] * (1.0f - bw.second) + capDb[i1] * bw.second;
-                db = std::min (db, std::max (cap, std::min (db, 0.0f)));
-            }
-            return Decibels::decibelsToGain (db, -400.0f) * staticAmp[(size_t) k];
-        };
-
-        // The synthesised continuation starts where each bin's measured data ends and carries on with the target
-        // decay. Its random phases are mixed per bin so that the channels keep the coherence they have in the
-        // recording. It starts on the bin's own decay line (fitted over the whole late range, so neither the last noisy
-        // frames nor the neighbours set its level) with the modification of that frame; the cap of the measured part
-        // does not apply to it (it keeps the recording's noise floor down, the line has none). The crossfade is long
-        // enough not to be heard as a step where the recording ends a little off its line.
-        auto lineGainAt = [&] (int m, int k) {
-            float db = std::min (kMaxBoostDb, slopeDb[(size_t) k] * std::max (0.0f, frameTime (m)));
-            if (! smoothDb.empty() && m < capFrames)
-            {
-                const auto& bw = binBand[(size_t) k];
-                db += smoothDb[(size_t) m * numBands + (size_t) bw.first] * (1.0f - bw.second)
-                    + smoothDb[(size_t) m * numBands + (size_t) std::min (bw.first + 1, (int) numBands - 1)] * bw.second;
-            }
-            return Decibels::decibelsToGain (db, -400.0f) * staticAmp[(size_t) k];
-        };
-        const int fadeFrames = original ? kCrossfadeFrames : std::max (kCrossfadeFrames, (int) std::lround (kCrossfadeSeconds * sr / hop));
-        // DecayMode::Original: the correction of 0.1.0-beta, per band from the last frames' level towards the target line
-        std::vector<float> synthCorrDb (original ? numBands : 0, 0.0f);
-        for (size_t b = 0; b < synthCorrDb.size() && capFrames > 0; ++b)
-        {
-            const float rn = src.bandRT[b], rtT = bandTarget (b);
-            const int vb = jlimit (0, capFrames - 1, (int) std::floor ((src.onset + validEnds[b] * sr) / hop));
-            double acc = 0.0; int cnt = 0;
-            for (int m = std::max (0, vb - 5); m <= vb; ++m)
-            {
-                const float tau = std::max (0.0f, (float) ((m * hop - src.onset) / sr));
-                const float line = src.bandIntercept[b] - 60.0f * tau / rtT;
-                const float modified = std::min (src.bandLevelDb[b][(size_t) m] + 60.0f * tau * (1.0f / rn - 1.0f / rtT),
-                                                 line + kCapMarginDb);
-                acc += line - modified;
-                ++cnt;
-            }
-            synthCorrDb[b] = cnt > 0 ? jlimit (-6.0f, 18.0f, (float) (acc / cnt)) : 0.0f;
-        }
-
-        const bool haveLines = perBin && src.binMix.size() == (size_t) bins * 10;
-        jassert (haveLines);
-        std::vector<std::complex<float>> phasor ((size_t) kPhaseTableSize);
-        for (int i = 0; i < kPhaseTableSize; ++i)
-            phasor[(size_t) i] = std::polar (1.0f, MathConstants<float>::twoPi * (float) i / (float) kPhaseTableSize);
-
-        std::vector<float> lateIn ((size_t) len), refAmp ((size_t) bins), refTime ((size_t) bins);
-        const float synthGain = std::sqrt ((float) N / (float) hop); // incoherent overlap-add compensation
-
-        // the late reverb of channel ci from lateIn: the measured part modified, the continuation synthesised with
-        // random phases drawn from seed (another seed for the variant: its continuation has its own fine structure)
-        auto resynthesise = [&] (size_t ci, int64 seed, bool measure) {
-            const int c = chans[ci];
-
-            // analysis of the measured late part
-            const int storedFrames = std::max (0, srcFrames - firstFrame);
-            std::vector<float> Xre ((size_t) storedFrames * (size_t) bins), Xim ((size_t) storedFrames * (size_t) bins);
-            for (int m = firstFrame; m < srcFrames; ++m)
-            {
-                const size_t off = (size_t) (m - firstFrame) * (size_t) bins;
-                stft.forward (lateIn.data(), len, m, Xre.data() + off, Xim.data() + off);
-            }
-
-            if (original)
-            {
-                // DecayMode::Original: the power of the last six valid frames, smoothed over 1/12 octave, corrected
-                // per band towards the target line
-                std::vector<double> refPower ((size_t) bins, 0.0), prefix ((size_t) bins + 1, 0.0);
-                for (int k = 0; k < bins; ++k)
-                {
-                    double acc = 0.0, tacc = 0.0; int cnt = 0;
-                    const int mv = validFrame[(size_t) k];
-                    for (int m = std::max (firstFrame, mv - 5); m <= mv && m < srcFrames; ++m)
-                    {
-                        const size_t off = (size_t) (m - firstFrame) * (size_t) bins + (size_t) k;
-                        const double g = gainAt (m, k);
-                        acc += (Xre[off] * Xre[off] + Xim[off] * Xim[off]) * g * g;
-                        tacc += frameTime (m);
-                        ++cnt;
-                    }
-                    refPower[(size_t) k] = cnt > 0 ? acc / cnt : 0.0;
-                    refTime[(size_t) k] = cnt > 0 ? (float) (tacc / cnt) : frameTime (mv);
-                    prefix[(size_t) k + 1] = prefix[(size_t) k] + refPower[(size_t) k];
-                }
-                for (int k = 0; k < bins; ++k)
-                {
-                    const int w = std::max (2, (int) (k * 0.0595)); // 2^(1/12) - 1
-                    const int a = std::max (0, k - w), b = std::min (bins - 1, k + w);
-                    refAmp[(size_t) k] = (float) std::sqrt ((prefix[(size_t) b + 1] - prefix[(size_t) a]) / (b - a + 1));
-                    if (numBands > 0)
-                    {
-                        const auto& bw = binBand[(size_t) k];
-                        refAmp[(size_t) k] *= Decibels::decibelsToGain (synthCorrDb[(size_t) bw.first] * (1.0f - bw.second)
-                                                  + synthCorrDb[(size_t) std::min (bw.first + 1, (int) numBands - 1)] * bw.second);
-                    }
-                }
-            }
-            else
-                for (int k = 0; k < bins; ++k)
-                {
-                    const int mv = validFrame[(size_t) k];
-                    const float tv = frameTime (mv);
-                    const float power = haveLines ? src.binPower[(size_t) c][(size_t) k] : 0.0f;
-                    refAmp[(size_t) k] = std::sqrt (power * std::pow (10.0f, std::max (-30.0f, -6.0f * tv / rtNat[(size_t) k])))
-                                       * lineGainAt (mv, k);
-                    refTime[(size_t) k] = tv;
-                }
-
-            // resynthesis
-            std::vector<float> y ((size_t) lateLen, 0.0f), norm ((size_t) lateLen, 0.0f);
-            Random channelRng (seed + 7919 * c); // DecayMode::Original: each channel its own noise
-            for (int m = firstFrame; m < outFrames; ++m)
-            {
-                const float t = frameTime (m);
-                const bool haveMeasured = m < srcFrames;
-                const size_t off = haveMeasured ? (size_t) (m - firstFrame) * (size_t) bins : 0;
-                Random rng (frameSeed (seed, m)); // per frame: the same draws for every channel
-
-                for (int k = 0; k < bins; ++k)
-                {
-                    const int mv = validFrame[(size_t) k];
-                    float yr = 0.0f, yi = 0.0f;
-                    float measuredWeight = 0.0f, synthWeight = 1.0f;
-                    if (haveMeasured && m <= mv)
-                    {
-                        const int fadeStart = mv - fadeFrames;
-                        const float alpha = m <= fadeStart ? 0.0f : (float) (m - fadeStart) / (float) fadeFrames;
-                        measuredWeight = std::sqrt (1.0f - alpha);
-                        synthWeight = std::sqrt (alpha);
-                    }
-                    if (measuredWeight > 0.0f)
-                    {
-                        const float g = gainAt (m, k) * measuredWeight;
-                        yr += Xre[off + (size_t) k] * g;
-                        yi += Xim[off + (size_t) k] * g;
-                    }
-                    if (synthWeight > 0.0f && k > 0 && k < bins - 1)
-                    {
-                        const float dt = t - refTime[(size_t) k];
-                        float a = synthGain * synthWeight * refAmp[(size_t) k] * std::pow (10.0f, -3.0f * dt / rtTgt[(size_t) k]);
-                        if (original)
-                        {
-                            const float phase = channelRng.nextFloat() * MathConstants<float>::twoPi;
-                            yr += a * std::cos (phase);
-                            yi += a * std::sin (phase);
-                        }
-                        else
-                        {
-                            std::complex<float> z;
-                            const size_t row = (size_t) k * 10 + ci * (ci + 1) / 2;
-                            for (size_t j = 0; j < chans.size(); ++j)
-                            {
-                                const auto& ph = phasor[(size_t) rng.nextInt (kPhaseTableSize)];
-                                if (j <= ci) z += (haveLines ? src.binMix[row + j] : std::complex<float> (j == ci ? 1.0f : 0.0f)) * ph;
-                            }
-                            yr += a * z.real();
-                            yi += a * z.imag();
-                        }
-                    }
-                    re[(size_t) k] = yr;
-                    im[(size_t) k] = yi;
-                }
-                stft.inverseAccumulate (re.data(), im.data(), m, y.data(), norm.data(), lateLen);
-            }
-            for (int n = 0; n < lateLen; ++n)
-                y[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
-
-            // gentle fade over the last 10 % (the level of the slowest bin there is already ~ -80 dB)
-            const int fadeLen = std::max (1, lateLen / 10);
-            for (int n = 0; n < fadeLen; ++n)
-                y[(size_t) (lateLen - 1 - n)] *= (float) (0.5 - 0.5 * std::cos (kPi * n / fadeLen));
-
-            if (measure)
-            {
-                lateEnergyNative += midBandEnergy (lateIn, sr);
-                lateEnergy += midBandEnergy (y, sr);
-            }
-            return y;
-        };
-
+        planLate();
         for (size_t ci = 0; ci < chans.size(); ++ci)
         {
             const int c = chans[ci];
@@ -1817,48 +1674,411 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         }
     }
 
-    // DecayMode::ConstantLevel: the energy of the preset at every decay (early reflections and late reverb together,
-    // so the decay stays one line across the crossover; a longer decay starts softer, a shorter one louder)
-    float levelComp = 1.0f;
-    if (measureLevel && earlyEnergy + lateEnergy > 1e-30)
-        levelComp = (float) std::sqrt ((earlyEnergyNative + lateEnergyNative) / (earlyEnergy + lateEnergy));
+    // ---- plan of the modified late reverb (not used where it stays as recorded)
+    std::vector<float> staticAmp;      // VLF, roll-off and Smooth's colour per bin
+    std::vector<int> validFrame;       // last frame of every bin's measured data
+    int srcFrames = 0, synthLen = 0, outFrames = 0, firstFrame = 0;
+    size_t numBands = 0;
+    std::vector<std::pair<int, float>> binBand; // lower band of every bin and the weight of the upper one
+    int capFrames = 0;
+    std::vector<float> capDb, smoothDb; // per frame and band
+    // the shape of the decay, stretched in time like the decay: per frame and band, the change of the measured
+    // part's level, and the shape the synthesised continuation follows (empty where no band has a shape)
+    std::vector<float> shapeCorrDb, shapeLineDb;
+    int fadeFrames = 0;
+    std::vector<float> synthCorrDb;
+    bool haveLines = false;
+    std::vector<std::complex<float>> phasor;
+    std::vector<float> lateIn, refAmp, refTime;
+    float synthGain = 0.0f;
 
-    // ---- assemble
-    const float gE = p.earlyDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.earlyDb) * levelComp;
-    const float gL = p.lateDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.lateDb + lateLevelDb) * levelComp;
-    const float gD = delayOn ? Decibels::decibelsToGain (p.delayDb) : 0.0f;
-
-    const int lateLen = (int) late[(size_t) chans.front()].size();
-    // the late offset (split captures): the late block moves against the reflections, earlier at most up to its
-    // first sound (-60 dB re. its peak), so nothing of it is cut
-    int lateStart = pd;
-    if (blocks && std::abs (p.lateOffsetMs) > 1e-3f)
+    void planLate()
     {
-        float peak = 0.0f;
-        for (int c : chans) for (float v : late[(size_t) c]) peak = std::max (peak, std::abs (v));
-        int first = lateLen;
-        for (int c : chans)
+        staticAmp.resize ((size_t) bins);
+        validFrame.resize ((size_t) bins);
+        // DecayMode::Original: the recording up to its floor or fade, also where it has left its decay line
+        const auto& validEnds = original && src.bandValidEndRecorded.size() == src.bandValidEnd.size()
+                                    ? src.bandValidEndRecorded : src.bandValidEnd;
+        const float vlfLin = vlfOff ? 0.0f : Decibels::decibelsToGain (p.vlfDb);
+        float tailSeconds = splitSec + 0.05f;
+        srcFrames = stft.numFrames (len);
+        const int lastFullFrame = std::max (1, (len - N / 2) / hop);
+
+        for (int k = 0; k < bins; ++k)
         {
-            const auto& x = late[(size_t) c];
-            for (int n = 0; n < std::min (first, (int) x.size()); ++n)
-                if (std::abs (x[(size_t) n]) > peak * 1e-3f) { first = n; break; }
+            const float f = std::max (1.0f, (float) (k * sr / N));
+            const float wv = 1.0f / (1.0f + std::pow (f / kVlfCrossoverHz, 4.0f));
+            float amp = 1.0f + (vlfLin - 1.0f) * wv;
+            if (p.lateRolloffHz < kRolloffBypassHz)
+                amp /= std::sqrt (1.0f + std::pow (f / p.lateRolloffHz, 4.0f));
+            if (p.smooth > 0.0f && (size_t) k < src.binColourDb.size())
+                amp *= Decibels::decibelsToGain (-p.smooth * jlimit (-kSmoothBoostDb, kSmoothCutDb, src.binColourDb[(size_t) k]));
+            staticAmp[(size_t) k] = amp;
+
+            const float tv = interpLogFreq (src.bandFreq, validEnds, f);
+            validFrame[(size_t) k] = jlimit (1, lastFullFrame, (int) std::floor ((src.onset + tv * sr) / hop));
+
+            if (f >= 40.0f && f <= 16000.0f)
+                tailSeconds = std::max (tailSeconds, rtTgt[(size_t) k] * kTailDb / 60.0f);
         }
-        lateStart = std::max (pd + (int) std::lround (p.lateOffsetMs * 0.001 * sr), -first);
+
+        // never beyond the budget, also where the reverb times were rounded up: the assembled response is not cut
+        synthLen = std::min ((int) (kMaxBuiltIRSeconds * sr),
+                             src.onset + std::min ((int) (tailSeconds * sr), std::max (0, tailBudget)) + N);
+        outFrames = stft.numFrames (synthLen);
+        firstFrame = blocks ? 0 : std::max (0, (splitA - N / 2) / hop - 1);
+
+        // per band and frame: largest gain that keeps the level at most kCapMarginDb above the target line
+        numBands = src.bandFreq.size();
+        binBand.assign ((size_t) bins, { 0, 0.0f });
+        for (int k = 0; k < bins; ++k)
+        {
+            const float f = std::max (1.0f, (float) (k * sr / N));
+            auto it = std::upper_bound (src.bandFreq.begin(), src.bandFreq.end(), f);
+            const int i1 = jlimit (0, (int) numBands - 1, (int) (it - src.bandFreq.begin()));
+            const int i0 = std::max (0, i1 - 1);
+            float t = 0.0f;
+            if (i1 != i0 && f > src.bandFreq[(size_t) i0])
+                t = jlimit (0.0f, 1.0f, std::log (f / src.bandFreq[(size_t) i0]) / std::log (src.bandFreq[(size_t) i1] / src.bandFreq[(size_t) i0]));
+            binBand[(size_t) k] = { i0, i1 == i0 ? 0.0f : t };
+        }
+        capFrames = numBands > 0 && ! src.bandLevelDb.empty() ? (int) src.bandLevelDb[0].size() : 0;
+        capDb.assign ((size_t) capFrames * numBands, kMaxBoostDb);
+        for (size_t b = 0; b < numBands && capFrames > 0; ++b)
+        {
+            const float rtT = bandTarget (b);
+            for (int m = 0; m < capFrames; ++m)
+            {
+                const float tau = std::max (0.0f, (float) ((m * hop - src.onset) / sr));
+                const float target = src.bandIntercept[b] - 60.0f * tau / rtT + kCapMarginDb;
+                capDb[(size_t) m * numBands + b] = target - src.bandLevelDb[b][(size_t) m];
+            }
+        }
+        // Smooth: per band and frame, pull the measured level towards the fitted decay line (bumps, late echoes)
+        if (p.smooth > 0.0f && capFrames > 0)
+        {
+            smoothDb.assign ((size_t) capFrames * numBands, 0.0f);
+            for (size_t b = 0; b < numBands; ++b)
+            {
+                const int vb = jlimit (0, capFrames - 1, (int) std::floor ((src.onset + src.bandValidEnd[b] * sr) / hop));
+                for (int m = 0; m <= vb; ++m)
+                {
+                    const float tau = (float) ((m * hop - src.onset) / sr);
+                    const float ramp = jlimit (0.0f, 1.0f, (tau - splitSec) / kSmoothRampSeconds);
+                    const float line = src.bandIntercept[b] - 60.0f * tau / src.bandRT[b];
+                    smoothDb[(size_t) m * numBands + b] = p.smooth * ramp
+                        * jlimit (-kSmoothCutDb, kSmoothBoostDb, line - src.bandLevelDb[b][(size_t) m]);
+                }
+            }
+        }
+
+        planShape();
+
+        fadeFrames = original ? kCrossfadeFrames : std::max (kCrossfadeFrames, (int) std::lround (kCrossfadeSeconds * sr / hop));
+        // DecayMode::Original: the correction of 0.1.0-beta, per band from the last frames' level towards the target line
+        synthCorrDb.assign (original ? numBands : 0, 0.0f);
+        for (size_t b = 0; b < synthCorrDb.size() && capFrames > 0; ++b)
+        {
+            const float rn = src.bandRT[b], rtT = bandTarget (b);
+            const int vb = jlimit (0, capFrames - 1, (int) std::floor ((src.onset + validEnds[b] * sr) / hop));
+            double acc = 0.0; int cnt = 0;
+            for (int m = std::max (0, vb - 5); m <= vb; ++m)
+            {
+                const float tau = std::max (0.0f, (float) ((m * hop - src.onset) / sr));
+                const float line = src.bandIntercept[b] - 60.0f * tau / rtT;
+                const float modified = std::min (src.bandLevelDb[b][(size_t) m] + 60.0f * tau * (1.0f / rn - 1.0f / rtT),
+                                                 line + kCapMarginDb);
+                acc += line - modified;
+                ++cnt;
+            }
+            synthCorrDb[b] = cnt > 0 ? jlimit (-6.0f, 18.0f, (float) (acc / cnt)) : 0.0f;
+        }
+
+        haveLines = perBin && src.binMix.size() == (size_t) bins * 10;
+        jassert (haveLines);
+        phasor.resize ((size_t) kPhaseTableSize);
+        for (int i = 0; i < kPhaseTableSize; ++i)
+            phasor[(size_t) i] = std::polar (1.0f, MathConstants<float>::twoPi * (float) i / (float) kPhaseTableSize);
+
+        lateIn.resize ((size_t) len);
+        refAmp.resize ((size_t) bins);
+        refTime.resize ((size_t) bins);
+        synthGain = std::sqrt ((float) N / (float) hop); // incoherent overlap-add compensation
     }
-    const int maxLen = (int) (kMaxBuiltIRSeconds * sr);
-    int total = std::max ((int) early[(size_t) chans.front()].size(), std::max (1, lateStart + lateLen + voices * dd));
-    // offset: leading silence, or the start is cut (keeping at least one sample)
-    const int pad = std::max (0, shift);
-    const int cut = std::min (std::max (0, -shift), total - 1);
-    const bool capped = total - cut + pad > maxLen;
-    total = std::min (total, maxLen + cut - pad);
-    const int fadeIn = std::min (total - cut, std::max (8, (int) (kOffsetFadeSeconds * sr)));
+
+    // The decay keeps its shape (a faster start, a bend to a second slope), stretched in time by the band's change of
+    // its reverb time, as in a room with more or less absorption: the gain slope moves the straight line, this moves
+    // the bend from its time t to t times the factor. Smooth takes it out along with the bumps. DecayMode::Original
+    // keeps the line of 0.1.0-beta.
+    void planShape()
+    {
+        if (original || ! decayShapeEnabled.load() || capFrames <= 0 || src.bandShapeDb.size() != numBands
+            || std::all_of (src.bandShapeDb.begin(), src.bandShapeDb.end(), [] (const auto& d) { return d.empty(); }))
+            return;
+
+        // the shape of band b at time tau after the onset (the first value before it, 0 after its range)
+        auto shapeAt = [this] (size_t b, float tau) {
+            const auto& d = src.bandShapeDb[b];
+            const float x = std::max (0.0f, (float) ((src.onset + tau * sr) / hop));
+            const int j = (int) x;
+            if (j + 1 >= (int) d.size()) return 0.0f;
+            return d[(size_t) j] + (x - (float) j) * (d[(size_t) j + 1] - d[(size_t) j]);
+        };
+        shapeCorrDb.assign ((size_t) capFrames * numBands, 0.0f);
+        shapeLineDb.assign ((size_t) outFrames * numBands, 0.0f);
+        const float keep = 1.0f - p.smooth;
+        for (size_t b = 0; b < numBands; ++b)
+        {
+            if (src.bandShapeDb[b].empty()) continue;
+            const float factor = bandTarget (b) / src.bandRT[b];
+            for (int m = 0; m < outFrames; ++m)
+            {
+                const float tau = frameTime (m);
+                const float stretched = keep * shapeAt (b, std::max (0.0f, tau) / factor);
+                shapeLineDb[(size_t) m * numBands + b] = stretched;
+                if (m >= capFrames) continue;
+                // after the crossover, faded in like Smooth (the early part keeps its time)
+                const float ramp = jlimit (0.0f, 1.0f, (tau - splitSec) / kSmoothRampSeconds);
+                shapeCorrDb[(size_t) m * numBands + b] = ramp * (stretched - keep * shapeAt (b, tau));
+                // the cap follows the target decay with its shape
+                capDb[(size_t) m * numBands + b] += stretched;
+            }
+        }
+    }
+
+    // gain of the measured part in frame m, bin k
+    float gainAt (int m, int k) const
+    {
+        float db = std::min (kMaxBoostDb, slopeDb[(size_t) k] * std::max (0.0f, frameTime (m)));
+        if (! capDb.empty() && m < capFrames)
+        {
+            const auto& bw = binBand[(size_t) k];
+            const size_t i0 = (size_t) m * numBands + (size_t) bw.first;
+            const size_t i1 = (size_t) m * numBands + (size_t) std::min (bw.first + 1, (int) numBands - 1);
+            if (! smoothDb.empty())
+                db += smoothDb[i0] * (1.0f - bw.second) + smoothDb[i1] * bw.second;
+            if (! shapeCorrDb.empty())
+                db += shapeCorrDb[i0] * (1.0f - bw.second) + shapeCorrDb[i1] * bw.second;
+            // never lift the measured band level above the target decay line (noise floor, fades)
+            const float cap = capDb[i0] * (1.0f - bw.second) + capDb[i1] * bw.second;
+            db = std::min (db, std::max (cap, std::min (db, 0.0f)));
+        }
+        return Decibels::decibelsToGain (db, -400.0f) * staticAmp[(size_t) k];
+    }
+
+    // The synthesised continuation starts where each bin's measured data ends and carries on with the target
+    // decay. Its random phases are mixed per bin so that the channels keep the coherence they have in the
+    // recording. It starts on the bin's own decay line (fitted over the whole late range, so neither the last noisy
+    // frames nor the neighbours set its level) with the modification of that frame; the cap of the measured part
+    // does not apply to it (it keeps the recording's noise floor down, the line has none). The crossfade is long
+    // enough not to be heard as a step where the recording ends a little off its line.
+    float lineGainAt (int m, int k) const
+    {
+        float db = std::min (kMaxBoostDb, slopeDb[(size_t) k] * std::max (0.0f, frameTime (m)));
+        if (! smoothDb.empty() && m < capFrames)
+        {
+            const auto& bw = binBand[(size_t) k];
+            db += smoothDb[(size_t) m * numBands + (size_t) bw.first] * (1.0f - bw.second)
+                + smoothDb[(size_t) m * numBands + (size_t) std::min (bw.first + 1, (int) numBands - 1)] * bw.second;
+        }
+        return Decibels::decibelsToGain (db, -400.0f) * staticAmp[(size_t) k];
+    }
+
+    // the late reverb of channel ci from lateIn: the measured part modified, the continuation synthesised with
+    // random phases drawn from seed (another seed for the variant: its continuation has its own fine structure)
+    std::vector<float> resynthesise (size_t ci, int64 seed, bool measure)
+    {
+        const int c = chans[ci];
+
+        // analysis of the measured late part
+        const int storedFrames = std::max (0, srcFrames - firstFrame);
+        std::vector<float> Xre ((size_t) storedFrames * (size_t) bins), Xim ((size_t) storedFrames * (size_t) bins);
+        for (int m = firstFrame; m < srcFrames; ++m)
+        {
+            const size_t off = (size_t) (m - firstFrame) * (size_t) bins;
+            stft.forward (lateIn.data(), len, m, Xre.data() + off, Xim.data() + off);
+        }
+
+        if (original)
+        {
+            // DecayMode::Original: the power of the last six valid frames, smoothed over 1/12 octave, corrected
+            // per band towards the target line
+            std::vector<double> refPower ((size_t) bins, 0.0), prefix ((size_t) bins + 1, 0.0);
+            for (int k = 0; k < bins; ++k)
+            {
+                double acc = 0.0, tacc = 0.0; int cnt = 0;
+                const int mv = validFrame[(size_t) k];
+                for (int m = std::max (firstFrame, mv - 5); m <= mv && m < srcFrames; ++m)
+                {
+                    const size_t off = (size_t) (m - firstFrame) * (size_t) bins + (size_t) k;
+                    const double g = gainAt (m, k);
+                    acc += (Xre[off] * Xre[off] + Xim[off] * Xim[off]) * g * g;
+                    tacc += frameTime (m);
+                    ++cnt;
+                }
+                refPower[(size_t) k] = cnt > 0 ? acc / cnt : 0.0;
+                refTime[(size_t) k] = cnt > 0 ? (float) (tacc / cnt) : frameTime (mv);
+                prefix[(size_t) k + 1] = prefix[(size_t) k] + refPower[(size_t) k];
+            }
+            for (int k = 0; k < bins; ++k)
+            {
+                const int w = std::max (2, (int) (k * 0.0595)); // 2^(1/12) - 1
+                const int a = std::max (0, k - w), b = std::min (bins - 1, k + w);
+                refAmp[(size_t) k] = (float) std::sqrt ((prefix[(size_t) b + 1] - prefix[(size_t) a]) / (b - a + 1));
+                if (numBands > 0)
+                {
+                    const auto& bw = binBand[(size_t) k];
+                    refAmp[(size_t) k] *= Decibels::decibelsToGain (synthCorrDb[(size_t) bw.first] * (1.0f - bw.second)
+                                              + synthCorrDb[(size_t) std::min (bw.first + 1, (int) numBands - 1)] * bw.second);
+                }
+            }
+        }
+        else
+            for (int k = 0; k < bins; ++k)
+            {
+                const int mv = validFrame[(size_t) k];
+                const float tv = frameTime (mv);
+                const float power = haveLines ? src.binPower[(size_t) c][(size_t) k] : 0.0f;
+                refAmp[(size_t) k] = std::sqrt (power * std::pow (10.0f, std::max (-30.0f, -6.0f * tv / rtNat[(size_t) k])))
+                                   * lineGainAt (mv, k);
+                refTime[(size_t) k] = tv;
+            }
+
+        // resynthesis
+        std::vector<float> y ((size_t) synthLen, 0.0f), norm ((size_t) synthLen, 0.0f);
+        Random channelRng (seed + 7919 * c); // DecayMode::Original: each channel its own noise
+        for (int m = firstFrame; m < outFrames; ++m)
+        {
+            const float t = frameTime (m);
+            const bool haveMeasured = m < srcFrames;
+            const size_t off = haveMeasured ? (size_t) (m - firstFrame) * (size_t) bins : 0;
+            Random rng (frameSeed (seed, m)); // per frame: the same draws for every channel
+
+            for (int k = 0; k < bins; ++k)
+            {
+                const int mv = validFrame[(size_t) k];
+                float yr = 0.0f, yi = 0.0f;
+                float measuredWeight = 0.0f, synthWeight = 1.0f;
+                if (haveMeasured && m <= mv)
+                {
+                    const int fadeStart = mv - fadeFrames;
+                    const float alpha = m <= fadeStart ? 0.0f : (float) (m - fadeStart) / (float) fadeFrames;
+                    measuredWeight = std::sqrt (1.0f - alpha);
+                    synthWeight = std::sqrt (alpha);
+                }
+                if (measuredWeight > 0.0f)
+                {
+                    const float g = gainAt (m, k) * measuredWeight;
+                    yr += Xre[off + (size_t) k] * g;
+                    yi += Xim[off + (size_t) k] * g;
+                }
+                if (synthWeight > 0.0f && k > 0 && k < bins - 1)
+                {
+                    const float dt = t - refTime[(size_t) k];
+                    float a = synthGain * synthWeight * refAmp[(size_t) k] * std::pow (10.0f, -3.0f * dt / rtTgt[(size_t) k]);
+                    if (! shapeLineDb.empty())
+                    {
+                        // the stretched shape carries on beyond the recording's own (refAmp is on the line)
+                        const auto& bw = binBand[(size_t) k];
+                        const size_t i0 = (size_t) m * numBands + (size_t) bw.first;
+                        const size_t i1 = (size_t) m * numBands + (size_t) std::min (bw.first + 1, (int) numBands - 1);
+                        a *= Decibels::decibelsToGain (shapeLineDb[i0] * (1.0f - bw.second) + shapeLineDb[i1] * bw.second);
+                    }
+                    if (original)
+                    {
+                        const float phase = channelRng.nextFloat() * MathConstants<float>::twoPi;
+                        yr += a * std::cos (phase);
+                        yi += a * std::sin (phase);
+                    }
+                    else
+                    {
+                        std::complex<float> z;
+                        const size_t row = (size_t) k * 10 + ci * (ci + 1) / 2;
+                        for (size_t j = 0; j < chans.size(); ++j)
+                        {
+                            const auto& ph = phasor[(size_t) rng.nextInt (kPhaseTableSize)];
+                            if (j <= ci) z += (haveLines ? src.binMix[row + j] : std::complex<float> (j == ci ? 1.0f : 0.0f)) * ph;
+                        }
+                        yr += a * z.real();
+                        yi += a * z.imag();
+                    }
+                }
+                re[(size_t) k] = yr;
+                im[(size_t) k] = yi;
+            }
+            stft.inverseAccumulate (re.data(), im.data(), m, y.data(), norm.data(), synthLen);
+        }
+        for (int n = 0; n < synthLen; ++n)
+            y[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
+
+        // gentle fade over the last 10 % (the level of the slowest bin there is already ~ -80 dB)
+        const int fadeLen = std::max (1, synthLen / 10);
+        for (int n = 0; n < fadeLen; ++n)
+            y[(size_t) (synthLen - 1 - n)] *= (float) (0.5 - 0.5 * std::cos (kPi * n / fadeLen));
+
+        if (measure)
+        {
+            lateEnergyNative += midBandEnergy (lateIn, sr);
+            lateEnergy += midBandEnergy (y, sr);
+        }
+        return y;
+    }
+
+    // ---- assembly
+    float gE = 0.0f, gL = 0.0f, gD = 0.0f;
+    int lateStart = 0;
+    int assembleLength = 0;  // of every part before the offset (what assemble writes, then cuts and pads)
+    int builtLength = 0;     // of the response after the offset
+    int pad = 0, cut = 0, fadeIn = 0;
+    bool capped = false;
+
+    void planAssembly()
+    {
+        // DecayMode::ConstantLevel: the energy of the preset at every decay (early reflections and late reverb together,
+        // so the decay stays one line across the crossover; a longer decay starts softer, a shorter one louder)
+        float levelComp = 1.0f;
+        if (measureLevel && earlyEnergy + lateEnergy > 1e-30)
+            levelComp = (float) std::sqrt ((earlyEnergyNative + lateEnergyNative) / (earlyEnergy + lateEnergy));
+
+        gE = p.earlyDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.earlyDb) * levelComp;
+        gL = p.lateDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.lateDb + lateLevelDb) * levelComp;
+        gD = delayOn ? Decibels::decibelsToGain (p.delayDb) : 0.0f;
+
+        const int lateLength = (int) late[(size_t) chans.front()].size();
+        // the late offset (split captures): the late block moves against the reflections, earlier at most up to its
+        // first sound (-60 dB re. its peak), so nothing of it is cut
+        lateStart = pd;
+        if (blocks && std::abs (p.lateOffsetMs) > 1e-3f)
+        {
+            float peak = 0.0f;
+            for (int c : chans) for (float v : late[(size_t) c]) peak = std::max (peak, std::abs (v));
+            int first = lateLength;
+            for (int c : chans)
+            {
+                const auto& x = late[(size_t) c];
+                for (int n = 0; n < std::min (first, (int) x.size()); ++n)
+                    if (std::abs (x[(size_t) n]) > peak * 1e-3f) { first = n; break; }
+            }
+            lateStart = std::max (pd + (int) std::lround (p.lateOffsetMs * 0.001 * sr), -first);
+        }
+        const int maxLen = (int) (kMaxBuiltIRSeconds * sr);
+        int total = std::max ((int) early[(size_t) chans.front()].size(), std::max (1, lateStart + lateLength + voices * dd));
+        // offset: leading silence, or the start is cut (keeping at least one sample)
+        pad = std::max (0, shift);
+        cut = std::min (std::max (0, -shift), total - 1);
+        capped = total - cut + pad > maxLen;
+        total = std::min (total, maxLen + cut - pad);
+        fadeIn = std::min (total - cut, std::max (8, (int) (kOffsetFadeSeconds * sr)));
+        assembleLength = total;
+        builtLength = total - cut + pad;
+    }
 
     // early part plus late reverb with its delay voices, then the offset. Linear, so the early part and the
     // late reverb assembled on their own add up to the whole response.
-    auto assemble = [&, total] (std::vector<float>& o, const std::vector<float>& e, float earlyGain,
-                                const std::vector<float>& l, float lateGain)
+    void assemble (std::vector<float>& o, const std::vector<float>& e, float earlyGain,
+                   const std::vector<float>& l, float lateGain) const
     {
+        const int total = assembleLength;
         o.assign ((size_t) total, 0.0f);
         for (int n = 0; n < std::min (total, (int) e.size()); ++n)
             o[(size_t) n] = e[(size_t) n] * earlyGain;
@@ -1885,64 +2105,64 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
                 o[(size_t) n] *= (float) (0.5 - 0.5 * std::cos (kPi * n / fadeIn));
         }
         o.insert (o.begin(), (size_t) pad, 0.0f);
-    };
-    for (int c : chans)
-        assemble (out->ch[(size_t) c], early[(size_t) c], gE, late[(size_t) c], gL);
-    total = total - cut + pad;
+    }
 
     // mid band energy for the distance mode (the level of the reverb against the direct sound)
+    void measureMidEnergy()
     {
         std::vector<float> impulse ((size_t) (0.05 * sr), 0.0f);
         impulse[0] = 1.0f;
         const double ref = midBandEnergy (impulse, sr);
         std::array<double, 4> e {};
         for (int c : chans)
-            e[(size_t) c] = midBandEnergy (out->ch[(size_t) c], sr) / ref;
+            e[(size_t) c] = midBandEnergy (out.ch[(size_t) c], sr) / ref;
         // each output channel receives two paths (L->L + R->L, L->R + R->R)
-        out->midEnergy = (float) ((e[0] + e[1] + e[2] + e[3]) * 0.5);
-        out->midEnergyDiagonal = (float) ((e[0] + e[3]) * 0.5);
+        out.midEnergy = (float) ((e[0] + e[1] + e[2] + e[3]) * 0.5);
+        out.midEnergyDiagonal = (float) ((e[0] + e[3]) * 0.5);
     }
-    out->seconds = (float) (total / sr);
 
     // ---- display data
-    const int points = 400;
-    auto builtChans = activeChannels (out->ch, out->trueStereo);
-    auto srcChans = activeChannels (shown.ch, shown.trueStereo);
-    const int span = std::max (total, shown.length());
-    const double refPower = maxSegmentPower (srcChans, points, span);
-    out->envelopeDb = envelopeDb (builtChans, points, span, refPower);
-    out->nativeEnvelopeDb = envelopeDb (srcChans, points, span, refPower);
-    out->seconds = (float) (span / sr);
-    out->rtFreqs = shown.bandFreq;
-    out->rtNative = shown.bandRT;
-    out->rtTarget.resize (src.bandRT.size());
-    for (size_t b = 0; b < src.bandRT.size(); ++b)
-        out->rtTarget[b] = bandTarget (b);
+    void fillDisplay()
+    {
+        const int points = 400;
+        auto builtChans = activeChannels (out.ch, out.trueStereo);
+        auto srcChans = activeChannels (shown.ch, shown.trueStereo);
+        const int span = std::max (builtLength, shown.length());
+        const double refPower = maxSegmentPower (srcChans, points, span);
+        out.envelopeDb = envelopeDb (builtChans, points, span, refPower);
+        out.nativeEnvelopeDb = envelopeDb (srcChans, points, span, refPower);
+        out.seconds = (float) (span / sr);
+        out.rtFreqs = shown.bandFreq;
+        out.rtNative = shown.bandRT;
+        out.rtTarget.resize (src.bandRT.size());
+        for (size_t b = 0; b < src.bandRT.size(); ++b)
+            out.rtTarget[b] = bandTarget (b);
+    }
 
     // ---- modulation: early part, late reverb and its variant as responses of their own
-    if (p.splitLate)
+    void splitForModulation()
     {
         // the variant: the same late reverb from another take, else with new random phases
         if (lateVariant && ! takeVariant)
             variantLate = makeVariant (late, chans, sr);
         const std::vector<float> none;
-        out->earlyTakes.resize (earlyOfTake.size());
-        out->lateTakes.resize (lateOfTake.size());
+        out.earlyTakes.resize (earlyOfTake.size());
+        out.lateTakes.resize (lateOfTake.size());
         for (int c : chans)
         {
-            assemble (out->late[(size_t) c], none, 0.0f, late[(size_t) c], gL);
+            assemble (out.late[(size_t) c], none, 0.0f, late[(size_t) c], gL);
             if (lateVariant)
-                assemble (out->variant[(size_t) c], none, 0.0f, variantLate[(size_t) c], gL);
-            assemble (out->ch[(size_t) c], early[(size_t) c], gE, none, 0.0f);
+                assemble (out.variant[(size_t) c], none, 0.0f, variantLate[(size_t) c], gL);
+            assemble (out.ch[(size_t) c], early[(size_t) c], gE, none, 0.0f);
             for (size_t t = 0; t < earlyOfTake.size(); ++t)
-                assemble (out->earlyTakes[t][(size_t) c], earlyOfTake[t][(size_t) c], gE, none, 0.0f);
+                assemble (out.earlyTakes[t][(size_t) c], earlyOfTake[t][(size_t) c], gE, none, 0.0f);
             for (size_t t = 0; t < lateOfTake.size(); ++t)
-                assemble (out->lateTakes[t][(size_t) c], none, 0.0f, lateOfTake[t][(size_t) c], gL);
+                assemble (out.lateTakes[t][(size_t) c], none, 0.0f, lateOfTake[t][(size_t) c], gL);
         }
 
         // the early part ends long before the late reverb: drop its trailing zeros (saves convolution)
-        std::vector<std::array<std::vector<float>, 4>*> earlyParts { &out->ch };
-        for (auto& take : out->earlyTakes) earlyParts.push_back (&take);
+        std::vector<std::array<std::vector<float>, 4>*> earlyParts { &out.ch };
+        for (auto& take : out.earlyTakes) earlyParts.push_back (&take);
         int end = 1;
         for (auto* part : earlyParts)
             for (int c : chans)
@@ -1966,10 +2186,26 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
                 rho.push_back ((float) jlimit (-1.0, 1.0, takeCorrelation (*all[k], *all[(k + 1) % all.size()])));
             return rho;
         };
-        out->earlyTakeRho = neighbours (out->ch, out->earlyTakes);
-        out->lateTakeRho = neighbours (out->late, out->lateTakes);
+        out.earlyTakeRho = neighbours (out.ch, out.earlyTakes);
+        out.lateTakeRho = neighbours (out.late, out.lateTakes);
     }
+};
 
+/** designIR on src; the display compares with shown (the preset itself, src may be its stretched copy). */
+std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown, const SourceIR* pattern, const DesignParams& p)
+{
+    auto out = std::make_shared<BuiltIR>();
+    out->sampleRate = src.sampleRate;
+    out->trueStereo = src.trueStereo;
+    out->presetId = src.presetId;
+    out->name = src.name;
+    out->nativeRT = shown.nativeRT;
+    out->targetRT = p.decay;
+    const int shift = (int) std::lround (p.offsetMs * 0.001 * src.sampleRate);
+    out->onsetMs = (float) (1000.0 * std::max (0, src.onset + shift) / src.sampleRate);
+    if (src.length() <= 0) return out;
+
+    ResponseBuilder (src, shown, pattern, p, *out).build();
     return out;
 }
 
@@ -2015,6 +2251,16 @@ std::shared_ptr<const SourceIR> stretchedSource (const SourceIR& src, float fact
     return st;
 }
 } // namespace
+
+void setDecayShapeEnabled (bool enabled)
+{
+    decayShapeEnabled.store (enabled);
+}
+
+bool isDecayShapeEnabled()
+{
+    return decayShapeEnabled.load();
+}
 
 std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern, const DesignParams& p)
 {

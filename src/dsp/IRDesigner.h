@@ -86,6 +86,10 @@ struct SourceIR
     std::vector<float> bandValidEndRecorded; // ... where it hits its floor only (DecayMode::Original)
     std::vector<float> bandIntercept;  // dB at the onset of the fitted decay line (same scale as bandLevelDb)
     std::vector<std::vector<float>> bandLevelDb; // smoothed band level per STFT frame (sum of channels)
+    // shape of each band's decay per STFT frame: the slow deviation of bandLevelDb from the decay line, without its
+    // own straight line, smoothed, 0 within the level's scatter and towards the end of the valid range (and after
+    // it); empty for a band without one (a straight line in dB)
+    std::vector<std::vector<float>> bandShapeDb;
     std::vector<float> binColourDb;  // late reverb level of each STFT bin relative to its third-octave neighbourhood
 
     // every STFT bin's own late decay: its reverb time, the power of each channel on that decay line at the
@@ -214,6 +218,12 @@ std::vector<float> resample (const std::vector<float>& in, double srcRate, doubl
 /** Creates the impulse response for the given parameters.
     @param pattern  optional source whose early part replaces the preset's early reflections */
 std::shared_ptr<BuiltIR> designIR (const SourceIR& src, const SourceIR* pattern, const DesignParams& params);
+
+/** Developer switch (concert7-dev --no-shape): with it off, DECAY moves a decay that is not a straight line in dB by
+    the same straight line as an exponential one (as up to 0.2.1-beta) instead of stretching its shape in time. On by
+    default; set before responses are designed. */
+void setDecayShapeEnabled (bool enabled);
+bool isDecayShapeEnabled();
 
 /** Broadband RT60 estimate (T20 fit on the Schroeder curve) of channel energy sum. Used by tests. */
 float estimateRT (const std::vector<const std::vector<float>*>& channels, double sampleRate,

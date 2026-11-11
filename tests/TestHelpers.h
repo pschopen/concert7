@@ -145,7 +145,7 @@ inline float aboveStretchedDb (const std::vector<double>& result, const std::vec
     int count = 0;
     for (size_t j = 30; j < result.size(); ++j)
     {
-        const double from = j / (double) factor;
+        const double from = (double) j / (double) factor;
         if (from + window > (double) recording.size()) break;
         const double own = sum (recording, from, window);
         if (own < peak * window * 1e-5) break;
