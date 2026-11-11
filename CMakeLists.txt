@@ -15,7 +15,7 @@ option(CONCERT7_BUILD_LV2 "Build the LV2 plugin" ${CONCERT7_LV2_DEFAULT})
 option(CONCERT7_BUILD_DEVTOOLS "Build the test/render/snapshot tool" ON)
 option(CONCERT7_COPY_AFTER_BUILD "Install plugins into the user plugin folders after building" OFF)
 
-project(CONCERT7 VERSION 0.2.0 LANGUAGES C CXX)
+project(CONCERT7 VERSION 0.2.1 LANGUAGES C CXX)
 set(CONCERT7_RELEASE_STAGE "beta")   # empty for a final release
 if(CONCERT7_RELEASE_STAGE)
     set(CONCERT7_VERSION_STRING "${PROJECT_VERSION}-${CONCERT7_RELEASE_STAGE}")

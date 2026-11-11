@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1-beta
+
+- **Long decays ring out**: a designed response used to end at the slowest band's RT60 and was capped at 30 s, so
+  at long DECAY settings the tail was cut while still clearly audible (at DECAY 30 s the mids were still around
+  -30 dB when the end fade began). It now runs until the slowest band has decayed by 90 dB, within 60 s; where
+  that does not fit (pre-delay, DELAY's voices and offset included), the slowest bands decay faster instead of
+  being cut. Impulse response files are still read up to 30 s.
+
 ## 0.2.0-beta
 
 ### Overview
