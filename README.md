@@ -16,7 +16,7 @@ Concert7 stands on the shoulders of two open source projects, and we are very gr
 **[KlangFalter](https://github.com/HiFi-LoFi/KlangFalter) by HiFi-LoFi**, whose
 [FFTConvolver](https://github.com/HiFi-LoFi/FFTConvolver) engine does the actual convolution. Thank you!
 
-> **Beta:** 0.2.1-beta. Please report problems in the [issue tracker](https://github.com/pschopen/concert7/issues).
+> **Beta:** 0.2.2-beta. Please report problems in the [issue tracker](https://github.com/pschopen/concert7/issues).
 
 ![Concert7](doc/concert7.png)
 

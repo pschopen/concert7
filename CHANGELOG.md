@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.2-beta
+
+- **DECAY keeps the shape of a decay**: a decay that is not a straight line in dB (a faster start, a bend to a
+  second slope) used to be moved by the same straight line as an exponential one, which shifted all its slopes by
+  the same amount. Now its shape is stretched in time, as in the same room with more or less absorption. On a
+  synthetic decay with two slopes, the level against the room made half or twice as large moves from about 3 dB
+  RMS away to about 1.3 dB. Most presets of the Bricasti library decay close to a straight line, so there the
+  change is small (median over the presets and bands at x0.5 1.45 → 1.40 dB, 90th percentile 3.2 → 3.0 dB). Smooth
+  at 100 % and the Original decay mode are unchanged.
+
 ## 0.2.1-beta
 
 - **Long decays ring out**: a designed response used to end at the slowest band's RT60 and was capped at 30 s, so
