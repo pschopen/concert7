@@ -43,7 +43,8 @@
 
 namespace concert7
 {
-inline constexpr double kMaxIRSeconds = 30.0;
+inline constexpr double kMaxIRSeconds = 30.0;      // read from an impulse response file
+inline constexpr double kMaxBuiltIRSeconds = 60.0; // a designed response (a long DECAY rings longer than its file)
 
 /** A true stereo impulse response at the host sample rate.
     Channels: 0 = L->L, 1 = L->R, 2 = R->L, 3 = R->R. For plain stereo

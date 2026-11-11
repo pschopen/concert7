@@ -30,6 +30,7 @@ namespace
     constexpr float kCrossfadeSeconds = 0.2f;   // measured -> synthesised tail
     constexpr float kMaxBoostDb       = 120.0f; // numeric guard only, the band cap does the real limiting
     constexpr float kLateFitStart     = 0.06f;  // RT is fitted on the late reverb, after the early reflections
+    constexpr float kTailDb           = 90.0f;  // the response ends where its slowest bin has decayed by this much
     constexpr float kCapMarginDb      = 6.0f;   // allowed excess over the target decay line
     constexpr float kEndToleranceDb   = 1.5f;   // the valid range ends where the level leaves the decay line by more
     constexpr float kEndWindowSeconds = 0.08f;  // ... averaged over +- this
@@ -1336,10 +1337,23 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     const DecayScaling decayScaling (src, p.decay, p.decayMode == DecayMode::Proportional);
     const bool constantLevel = p.decayMode == DecayMode::ConstantLevel;
     const bool original = p.decayMode == DecayMode::Original;
+
+    // The late reverb runs until its slowest bin has decayed by kTailDb (the fade-out over its last 10 % starts below
+    // -80 dB), after the pre-delay, DELAY's voices and the offset's leading silence. Where that would not fit into
+    // kMaxBuiltIRSeconds, the slowest bins decay faster: a cut tail would end audibly.
+    const int pd = (int) std::lround (p.predelayMs * 0.001 * sr);
+    const bool delayOn = p.delayDb > kDelayOffDb + 0.01f;
+    const int dd = (int) std::lround (p.delayMs * 0.001 * sr);
+    const int voices = delayOn ? 3 : 0;
+    const int lateOffset = blocks ? std::max (0, (int) std::lround (p.lateOffsetMs * 0.001 * sr)) : 0;
+    const int tailBudget = (int) (kMaxBuiltIRSeconds * sr) - std::max (0, shift) - std::max (0, pd) - lateOffset
+                         - voices * std::max (0, dd) - src.onset - stftSizeFor (sr);
+    const float maxRT = std::max (0.05f, (float) (tailBudget / sr) * 60.0f / kTailDb);
+
     // target reverb time of a band (DecayMode::Original: every band by the same factor, without the bass limit)
     auto bandTarget = [&] (size_t b) {
         const float f = src.bandFreq[b];
-        return jlimit (0.05f, 120.0f, (original ? src.bandRT[b] * scale : decayScaling (src.bandRT[b], f)) * decayMultiplier (f, p));
+        return jlimit (0.05f, maxRT, (original ? src.bandRT[b] * scale : decayScaling (src.bandRT[b], f)) * decayMultiplier (f, p));
     };
     const bool vlfOff = p.vlfDb <= kVlfOffDb + 0.01f;
     const bool neutralLate = std::abs (scale - 1.0f) < 0.005f && std::abs (p.lowMult - 1.0f) < 0.005f
@@ -1358,7 +1372,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         const float f = std::max (1.0f, (float) (k * sr / N));
         // DecayMode::Original: the third octave's decay for all its bins
         const float rn = perBin && ! original ? src.binRT[(size_t) k] : interpLogFreq (src.bandFreq, src.bandRT, f);
-        const float rt = jlimit (0.05f, 120.0f, (original ? rn * scale : decayScaling (rn, f)) * decayMultiplier (f, p));
+        const float rt = jlimit (0.05f, maxRT, (original ? rn * scale : decayScaling (rn, f)) * decayMultiplier (f, p));
         rtNat[(size_t) k] = rn;
         rtTgt[(size_t) k] = rt;
         slopeDb[(size_t) k] = 60.0f * (1.0f / rn - 1.0f / rt);
@@ -1520,10 +1534,10 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
             validFrame[(size_t) k] = jlimit (1, lastFullFrame, (int) std::floor ((src.onset + tv * sr) / hop));
 
             if (f >= 40.0f && f <= 16000.0f)
-                tailSeconds = std::max (tailSeconds, rtTgt[(size_t) k]);
+                tailSeconds = std::max (tailSeconds, rtTgt[(size_t) k] * kTailDb / 60.0f);
         }
 
-        const int lateLen = std::min ((int) (kMaxIRSeconds * sr), src.onset + (int) (tailSeconds * sr) + N);
+        const int lateLen = std::min ((int) (kMaxBuiltIRSeconds * sr), src.onset + (int) (tailSeconds * sr) + N);
         const int outFrames = stft.numFrames (lateLen);
         const int firstFrame = blocks ? 0 : std::max (0, (splitA - N / 2) / hop - 1);
 
@@ -1751,7 +1765,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
             for (int n = 0; n < lateLen; ++n)
                 y[(size_t) n] = norm[(size_t) n] > 1e-3f ? y[(size_t) n] / norm[(size_t) n] : 0.0f;
 
-            // gentle fade over the last 10 % (the level there is already ~ -54 dB)
+            // gentle fade over the last 10 % (the level of the slowest bin there is already ~ -80 dB)
             const int fadeLen = std::max (1, lateLen / 10);
             for (int n = 0; n < fadeLen; ++n)
                 y[(size_t) (lateLen - 1 - n)] *= (float) (0.5 - 0.5 * std::cos (kPi * n / fadeLen));
@@ -1808,10 +1822,6 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         levelComp = (float) std::sqrt ((earlyEnergyNative + lateEnergyNative) / (earlyEnergy + lateEnergy));
 
     // ---- assemble
-    const int pd = (int) std::lround (p.predelayMs * 0.001 * sr);
-    const bool delayOn = p.delayDb > kDelayOffDb + 0.01f;
-    const int dd = (int) std::lround (p.delayMs * 0.001 * sr);
-    const int voices = delayOn ? 3 : 0;
     const float gE = p.earlyDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.earlyDb) * levelComp;
     const float gL = p.lateDb <= kLevelOffDb + 0.01f ? 0.0f : Decibels::decibelsToGain (p.lateDb + lateLevelDb) * levelComp;
     const float gD = delayOn ? Decibels::decibelsToGain (p.delayDb) : 0.0f;
@@ -1833,7 +1843,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
         }
         lateStart = std::max (pd + (int) std::lround (p.lateOffsetMs * 0.001 * sr), -first);
     }
-    const int maxLen = (int) (kMaxIRSeconds * sr);
+    const int maxLen = (int) (kMaxBuiltIRSeconds * sr);
     int total = std::max ((int) early[(size_t) chans.front()].size(), std::max (1, lateStart + lateLen + voices * dd));
     // offset: leading silence, or the start is cut (keeping at least one sample)
     const int pad = std::max (0, shift);
