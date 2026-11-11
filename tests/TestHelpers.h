@@ -106,7 +106,8 @@ inline std::vector<double> bandBlocks (const std::array<std::vector<float>, 4>& 
             return out;
         }
     };
-    const auto k = juce::IIRCoefficients::makeBandPass (sr, fc, 4.3).coefficients; // b0 b1 b2 a1 a2, a0 = 1
+    const auto coeffs = juce::IIRCoefficients::makeBandPass (sr, fc, 4.3);
+    const float* k = coeffs.coefficients; // b0 b1 b2 a1 a2, a0 = 1
     const int block = (int) (0.01 * sr);
     std::vector<double> e;
     for (auto& c : x)
