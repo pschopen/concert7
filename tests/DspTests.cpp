@@ -137,7 +137,7 @@ public:
             auto ir = designIR (*src, nullptr, p);
             const float rt = rtOf (*ir);
             logMessage ("  target " + String (p.decay, 3) + " s, measured " + String (rt, 3) + " s, length " + String (ir->seconds, 2) + " s");
-            expectWithinAbsoluteError (rt, p.decay, p.decay * 0.1f);
+            expectWithinAbsoluteError (rt, p.decay, p.decay * 0.05f); // a difference of 5 % can just be heard
         }
 
         beginTest ("extending a truncated recording far beyond its length");
@@ -151,6 +151,122 @@ public:
             logMessage ("  measured " + String (rt, 3) + " s");
             expectWithinAbsoluteError (rt, 5.0f, 0.6f);
             for (auto& c : ir->ch) for (float v : c) if (! std::isfinite (v)) { expect (false, "non finite sample"); break; }
+        }
+
+        // level of all channels over a stretch of the response (seconds after the onset), dB per sample
+        auto levelDb = [&] (const BuiltIR& ir, double from, double to) {
+            const int a = src->onset + (int) (from * sr), b = src->onset + (int) (to * sr);
+            double e = 0.0;
+            for (auto* c : chans (ir.ch)) e += energy (*c, a, b);
+            return 10.0 * std::log10 (e / std::max (1, b - a) + 1e-30);
+        };
+        // level of a third octave over a stretch of the response (seconds from its start), dB per 10 ms block
+        auto bandDb = [] (const std::vector<double>& blocks, double from, double to) {
+            double e = 0.0;
+            const int a = (int) (from * 100.0), b = std::min ((int) blocks.size(), (int) (to * 100.0));
+            for (int i = a; i < b; ++i) e += blocks[(size_t) i];
+            return 10.0 * std::log10 (e / std::max (1, b - a) + 1e-30);
+        };
+        auto lastBlocksDb = [] (const std::vector<double>& blocks) {
+            const size_t n = blocks.size();
+            return n < 2 ? 0.0 : 10.0 * std::log10 (0.5 * (blocks[n - 1] + blocks[n - 2]) + 1e-30);
+        };
+
+        beginTest ("the response runs until it has decayed by 90 dB: its end is not heard");
+        {
+            auto p = neutral;
+            p.decay = src->nativeRT * 3.0f;
+            auto ir = designIR (*src, nullptr, p);
+            // white noise, every frequency with the same decay: 90 dB take 1.5 reverb times (the slowest bin a little more)
+            const float seconds = (float) (ir->length() / sr);
+            expectGreaterThan (seconds, 1.5f * p.decay);
+            expectLessThan (seconds, 1.5f * p.decay * 1.15f);
+
+            // the decay stays on its line far below -60 dB (a response that ended there would fade from -54 dB on) ...
+            const double rt = p.decay, start = levelDb (*ir, 0.2 * rt, 0.3 * rt);
+            double worst = 0.0;
+            for (double t : { 0.7, 0.9, 1.1, 1.3 })
+                worst = std::max (worst, std::abs (levelDb (*ir, (t - 0.05) * rt, (t + 0.05) * rt) - (start - 60.0 * (t - 0.25))));
+            // ... the fade-out over the last 10 % starts below -80 dB and ends in silence
+            const double beforeFade = levelDb (*ir, 0.86 * seconds, 0.89 * seconds) - (start + 60.0 * 0.25);
+            const double last = levelDb (*ir, seconds - 0.016, seconds - 0.011) - (start + 60.0 * 0.25);
+            logMessage ("  length " + String (seconds, 2) + " s (" + String (seconds / p.decay, 2) + " reverb times), off the decay line by at most "
+                        + String (worst, 2) + " dB down to -78 dB, " + String (beforeFade, 1) + " dB before the fade-out, "
+                        + String (last, 1) + " dB at the end");
+            expectLessThan (worst, 2.0);
+            expectLessThan (beforeFade, -75.0);
+            expectLessThan (last, -120.0);
+        }
+
+        beginTest ("a decay too long for a response of 60 s: the slowest frequencies decay faster, nothing is cut");
+        {
+            const int maxLen = (int) (kMaxBuiltIRSeconds * sr);
+            auto p = neutral;
+            p.decayMode = DecayMode::Proportional; // every frequency by the same factor: the mids ring 30 s ...
+            p.decay = 30.0f;
+            p.lowFreq = 100.0f;
+            p.lowMult = 4.0f;                      // ... and the bass would ring 60 s and more
+            auto ir = designIR (*src, nullptr, p);
+            expectLessOrEqual (ir->length(), maxLen);
+            expectGreaterThan (ir->length(), maxLen - (int) (0.1 * sr));
+
+            // 90 dB in the 60 s less the onset and an STFT frame: 40 s for the bass, the mids keep their 30 s
+            auto targetAt = [&] (const BuiltIR& b, float fc) {
+                size_t best = 0;
+                for (size_t i = 1; i < b.rtFreqs.size(); ++i)
+                    if (std::abs (std::log (b.rtFreqs[i] / fc)) < std::abs (std::log (b.rtFreqs[best] / fc))) best = i;
+                return b.rtTarget[best];
+            };
+            for (float t : ir->rtTarget) expectLessThan (t, 40.0f);
+            for (float fc : { 50.0f, 63.0f, 100.0f })
+                expectWithinAbsoluteError (targetAt (*ir, fc), 39.95f, 0.1f, String (fc) + " Hz target");
+            expectWithinAbsoluteError (targetAt (*ir, 1000.0f), 30.0f, 1.0f, "1 kHz target");
+
+            // rendered: the bass on its faster line down to the fade-out (left at 60 s and more it would be cut 35 dB
+            // above that), the mids at their 30 s
+            const auto bass = bandBlocks (ir->ch, sr, 63.0f), mids = bandBlocks (ir->ch, sr, 1000.0f);
+            const double bassDrop = bandDb (bass, 5.0, 7.0) - bandDb (bass, 51.0, 53.0);
+            const double midsDrop = bandDb (mids, 2.0, 3.0) - bandDb (mids, 22.0, 23.0);
+            const double end = lastBlocksDb (bass) - bandDb (bass, 5.0, 7.0);
+            logMessage ("  length " + String (ir->length() / sr, 2) + " s, 63 Hz falls " + String (bassDrop, 1) + " dB in 46 s (target "
+                        + String (46.0 * 60.0 / targetAt (*ir, 63.0f), 1) + "), 1 kHz " + String (midsDrop, 1) + " dB in 20 s (target "
+                        + String (20.0 * 60.0 / targetAt (*ir, 1000.0f), 1) + "), the bass ends " + String (-end, 1) + " dB below its start");
+            expectWithinAbsoluteError (bassDrop, 46.0 * 60.0 / targetAt (*ir, 63.0f), 3.0);
+            expectWithinAbsoluteError (midsDrop, 20.0 * 60.0 / targetAt (*ir, 1000.0f), 2.0);
+            expectLessThan (end, -110.0);
+            bool finite = true;
+            for (auto* c : chans (ir->ch)) for (float v : *c) finite = finite && std::isfinite (v);
+            expect (finite, "finite");
+
+            // pre-delay, DELAY's voices and the offset's silence come out of the same 60 s: the late reverb is that much
+            // shorter, the last voice ends with the response
+            p.predelayMs = 500.0f;
+            p.delayMs = 1000.0f;
+            p.delayDb = -6.0f;
+            p.offsetMs = 100.0f;
+            auto delayed = designIR (*src, nullptr, p);
+            expectLessOrEqual (delayed->length(), maxLen);
+            expectGreaterThan (delayed->length(), maxLen - (int) (0.1 * sr));
+            const float shorter = (60.0f - 0.5f - 3.0f - 0.1f) / 60.0f;
+            expectWithinAbsoluteError (targetAt (*delayed, 63.0f), 39.95f * shorter, 0.1f, "63 Hz target with pre-delay, DELAY and offset");
+            const auto delayedBass = bandBlocks (delayed->ch, sr, 63.0f);
+            logMessage ("  with pre-delay, DELAY and offset: length " + String (delayed->length() / sr, 2) + " s, 63 Hz target "
+                        + String (targetAt (*delayed, 63.0f), 2) + " s, the bass ends "
+                        + String (bandDb (delayedBass, 8.0, 10.0) - lastBlocksDb (delayedBass), 1) + " dB below its start");
+            expectLessThan (lastBlocksDb (delayedBass) - bandDb (delayedBass, 8.0, 10.0), -110.0);
+
+            // the same at other sample rates (their STFT frames are longer)
+            for (double rate : { 44100.0, 96000.0 })
+            {
+                auto other = makeSourceIR (syntheticIR (1.6f, 2.5f, rate, 21), true, rate, rate, "synthetic");
+                auto q = p;
+                q.predelayMs = q.offsetMs = 0.0f;
+                q.delayDb = -200.0f;
+                auto built = designIR (*other, nullptr, q);
+                expectLessOrEqual (built->length(), (int) (kMaxBuiltIRSeconds * rate), String (rate) + " Hz length");
+                expectGreaterThan (built->length(), (int) ((kMaxBuiltIRSeconds - 0.1) * rate), String (rate) + " Hz length");
+                expectWithinAbsoluteError (targetAt (*built, 63.0f), 39.95f, 0.1f, String (rate) + " Hz, 63 Hz target");
+            }
         }
 
         beginTest ("the synthesised tail is noise: every frequency at its level, none cancelled or ringing");

@@ -1423,7 +1423,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
     {
         auto& e = early[(size_t) c];
         e.assign ((size_t) earlyLen, 0.0f);
-        const int shift = pattern != nullptr ? pattern->onset - src.onset : 0;
+        const int patternShift = pattern != nullptr ? pattern->onset - src.onset : 0;
         int esChan = c;
         if (! es.trueStereo && (c == 1 || c == 2)) esChan = -1;
         if (esChan >= 0)
@@ -1431,7 +1431,7 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
             const auto& x = earlyBlock ? es.earlyBlock[(size_t) esChan] : es.ch[(size_t) esChan];
             for (int n = 0; n < (int) e.size(); ++n)
             {
-                const int idx = n + shift;
+                const int idx = n + patternShift;
                 if (idx >= 0 && idx < (int) x.size())
                     e[(size_t) n] = earlyBlock ? x[(size_t) idx] : x[(size_t) idx] * earlyWeight (n);
             }
@@ -1537,7 +1537,9 @@ std::shared_ptr<BuiltIR> designFrom (const SourceIR& src, const SourceIR& shown,
                 tailSeconds = std::max (tailSeconds, rtTgt[(size_t) k] * kTailDb / 60.0f);
         }
 
-        const int lateLen = std::min ((int) (kMaxBuiltIRSeconds * sr), src.onset + (int) (tailSeconds * sr) + N);
+        // never beyond the budget, also where the reverb times were rounded up: the assembled response is not cut
+        const int lateLen = std::min ((int) (kMaxBuiltIRSeconds * sr),
+                                      src.onset + std::min ((int) (tailSeconds * sr), std::max (0, tailBudget)) + N);
         const int outFrames = stft.numFrames (lateLen);
         const int firstFrame = blocks ? 0 : std::max (0, (splitA - N / 2) / hop - 1);
 

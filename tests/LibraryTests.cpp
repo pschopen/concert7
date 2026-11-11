@@ -193,8 +193,8 @@ public:
         beginTest ("decay control on every preset: reaches the target, no level jumps, finite output");
         const double sr = 48000.0;
         int exponential = 0, onTarget = 0, designs = 0, jumps = 0;
-        float worstExcess = 0.0f;
-        String worstPreset;
+        float worstExcess = 0.0f, loudestEnd = -1000.0f;
+        String worstPreset, loudestEndPreset;
         for (auto& p : presets)
         {
             if (p.categoryOrder >= 100) continue;
@@ -238,6 +238,24 @@ public:
                 for (auto& c : ir->ch) for (float v : c) finite = finite && std::isfinite (v) && std::abs (v) < 10.0f;
                 expect (finite, p.id + " finite");
 
+                // the end is not heard: before the fade-out over its last 10 % the response lies far below its loudest
+                // 50 ms (a response cut while it still rings would end there)
+                expectLessOrEqual (ir->length(), (int) (kMaxBuiltIRSeconds * sr), p.id + " length");
+                {
+                    const int seg = (int) (0.05 * sr), n = ir->length();
+                    double loudest = 0.0, end = 0.0;
+                    for (int pos = 0; pos + seg <= n; pos += seg)
+                    {
+                        double e = 0.0;
+                        for (auto* c : chans (ir->ch, ir->trueStereo)) e += energy (*c, pos, pos + seg);
+                        loudest = std::max (loudest, e / seg);
+                    }
+                    const int a = (int) (0.85 * n), b = (int) (0.9 * n);
+                    for (auto* c : chans (ir->ch, ir->trueStereo)) end += energy (*c, a, b);
+                    const float endDb = (float) (10.0 * std::log10 ((end / std::max (1, b - a) + 1e-30) / (loudest + 1e-30)));
+                    if (endDb > loudestEnd) { loudestEnd = endDb; loudestEndPreset = p.id + " x" + String (factor); }
+                }
+
                 const float excess = maxRise (ir->ch, ir->trueStereo) - std::max (3.0f, nativeRise);
                 if (excess > worstExcess) { worstExcess = excess; worstPreset = p.id + " x" + String (factor); }
                 if (excess > 3.0f) ++jumps;
@@ -254,6 +272,8 @@ public:
         logMessage ("  " + String (designs) + " designs, " + String (onTarget) + " / " + String (exponential)
                     + " exponential decays within 20 % of the target, " + String (jumps) + " with level jumps > 3 dB"
                     + (worstPreset.isNotEmpty() ? " (worst: " + worstPreset + ", +" + String (worstExcess, 1) + " dB)" : String()));
+        logMessage ("  loudest end of a response: " + String (-loudestEnd, 1) + " dB below its loudest 50 ms (" + loudestEndPreset + ")");
+        expectLessThan (loudestEnd, -75.0f, "no response ends while it can still be heard");
         expectGreaterOrEqual (onTarget, exponential * 9 / 10, "90 % of exponential presets on target");
         expectLessOrEqual (jumps, designs / 50, "at most 2 % of designs with level jumps");
     }
