@@ -90,21 +90,33 @@ inline std::vector<const std::vector<float>*> chans (const std::array<std::vecto
     return { &ch[0], &ch[3] };
 }
 
-/** Energy of a third octave band of all channels, in 10 ms blocks. */
+/** Energy of a third octave band of all channels, in 10 ms blocks. The band pass runs in double precision and
+    keeps quiet signals: juce::IIRFilter sets everything below 1e-8 (-160 dB) to zero on Intel, which silenced the
+    end of long tails there (and only there). */
 inline std::vector<double> bandBlocks (const std::array<std::vector<float>, 4>& x, double sr, float fc)
 {
+    struct Biquad
+    {
+        double b0, b1, b2, a1, a2, v1 = 0.0, v2 = 0.0;
+        double process (double in)
+        {
+            const double out = b0 * in + v1;
+            v1 = b1 * in - a1 * out + v2;
+            v2 = b2 * in - a2 * out;
+            return out;
+        }
+    };
+    const auto k = juce::IIRCoefficients::makeBandPass (sr, fc, 4.3).coefficients; // b0 b1 b2 a1 a2, a0 = 1
     const int block = (int) (0.01 * sr);
     std::vector<double> e;
     for (auto& c : x)
     {
-        juce::IIRFilter f1, f2;
-        f1.setCoefficients (juce::IIRCoefficients::makeBandPass (sr, fc, 4.3));
-        f2.setCoefficients (juce::IIRCoefficients::makeBandPass (sr, fc, 4.3));
+        Biquad f1 { k[0], k[1], k[2], k[3], k[4] }, f2 = f1;
         e.resize (std::max (e.size(), c.size() / (size_t) block), 0.0);
         for (size_t n = 0; n < c.size(); ++n)
         {
-            const float v = f2.processSingleSampleRaw (f1.processSingleSampleRaw (c[n]));
-            if (n / (size_t) block < e.size()) e[n / (size_t) block] += (double) v * v;
+            const double v = f2.process (f1.process (c[n]));
+            if (n / (size_t) block < e.size()) e[n / (size_t) block] += v * v;
         }
     }
     return e;
