@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0-beta
 
 - **WIR library under OTHER**: Concert7 reads .wir files directly (no converted copies). A folder of the WIR
   library becomes one preset per space, position and microphones (cardioid, omni, wide, binaural), sorted by its
