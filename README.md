@@ -54,7 +54,8 @@ standalone), `.tar.gz` for Linux x86_64 (`./install.sh`: VST3, LV2, standalone).
 **Impulse responses are required and not included.** Concert7's setup screen (also SETUP → "Install impulse
 responses…") links to the two free M7 libraries it is tested with – their makers are independent companies, there
 is no partnership with them. Download an archive and drop it onto the setup screen; for OTHER choose any folder of
-WAV, AIFF or FLAC files (subfolders become the categories).
+WAV, AIFF, FLAC or WIR (.wir) files (subfolders become the categories; the WIR library is sorted
+by its kinds of spaces, one preset per space, position and microphones).
 
 ## Building from source
 

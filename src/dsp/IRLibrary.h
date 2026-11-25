@@ -29,6 +29,7 @@ struct IRVariant
     juce::File right;
     juce::File single;
     std::vector<juce::File> heads, tails; // split captures: early reflections / late reverb, take 1 first
+    bool swapOutputs = false;             // a 4 channel file with its outputs the other way round (WIR library, "wide")
 
     bool isValid() const;
     bool isTrueStereo() const { return quad != juce::File() || (left != juce::File() && right != juce::File()) || ! heads.empty(); }
@@ -58,7 +59,8 @@ struct IRPreset
 /**
     Scans folders (recursively) for impulse responses. Understands M7 files named by
     bank and number ("1 Halls 01 Large Hall, 48K L.wav", "... 48K.wav" for quad files),
-    split captures in a folder per preset ("Halls2/05 Small Hall/head-1.flac", "tail-1.flac")
+    split captures in a folder per preset ("Halls2/05 Small Hall/head-1.flac", "tail-1.flac"),
+    the WIR library (.wir, one preset per space, position and microphones, see parseWirName)
     and treats any other audio file as an impulse response of its own (OTHER).
 */
 class IRLibrary
@@ -96,9 +98,25 @@ public:
     /** path: at least the last three parts ("Halls2/05 Small Hall/head-1.flac"), '/' or '\' separated. */
     static ParsedSplit parseSplitPath (const juce::String& path);
 
-    /** Scans the folders synchronously (directory listing only, no audio is read). Every folder may hold any kind;
+    /** A file of the WIR library. Sampled spaces: "Example Hall_scg1v2" in a folder per space, the routing
+        (m mono, x mono to stereo, s true stereo; MB/SB/MQ are B-format and surround sets), the microphones
+        (c cardioid, o omni, W wide, d binaural) and the position. Virtual spaces: "Synthetic_s_Smooth Hall". */
+    struct ParsedWir
+    {
+        bool ok = false;
+        bool surround = false;   // B-format and surround sets: not used (they need a decoder)
+        bool sampled = false;
+        int position = 0;        // sampled spaces: the position of source and microphones (1 ...)
+        juce::String mic;        // sampled spaces: "Cardioid", "Omni", "Wide", "Binaural"
+        juce::String name;       // virtual spaces: "Smooth Hall"
+    };
+
+    static ParsedWir parseWirName (const juce::String& fileNameWithoutExtension);
+
+    /** Scans the folders synchronously (directory listing only, no audio is read; of .wir files the header). Every folder may hold any kind;
         the other impulse responses (OTHER) get their category from their first subfolder ("User" in the folder
-        itself). */
+        itself), those of the WIR library from the folder of their kind of space ("Concert Halls"). Of the
+        routings of a WIR preset the one with the most channels is used. */
     void scan (const juce::File& irFolder, const juce::File& splitFolder = {}, const juce::File& ownFolder = {});
 
     const std::vector<IRPreset>& getPresets() const { return presets; }

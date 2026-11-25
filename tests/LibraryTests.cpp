@@ -5,6 +5,7 @@
 
 #include "TestHelpers.h"
 #include "dsp/IRLibrary.h"
+#include "dsp/WIRFile.h"
 #include <map>
 #include <set>
 
@@ -52,6 +53,159 @@ public:
         expectEquals (preset.bestVariantFor (96000.0).first, 48000);
         expectEquals (preset.bestVariantFor (192000.0).first, 48000);
         expectEquals (preset.bestVariantFor (32000.0).first, 44100);
+
+        beginTest ("WIR library naming scheme");
+        auto w = IRLibrary::parseWirName ("Example Hall_scg1v2");
+        expect (w.ok && w.sampled && ! w.surround);
+        expectEquals (w.position, 1);
+        expectEquals (w.mic, String ("Cardioid"));
+        w = IRLibrary::parseWirName ("Hillside Concert Hall_xcd4");
+        expect (w.ok && w.sampled && ! w.surround);
+        expectEquals (w.position, 4);
+        expectEquals (IRLibrary::parseWirName ("Old Gallery_mog2v2").mic, String ("Omni"));
+        expectEquals (IRLibrary::parseWirName ("Town Church_sWg3v2").mic, String ("Wide"));
+        expectEquals (IRLibrary::parseWirName ("Film Stage_sdg1v2").mic, String ("Binaural"));
+        expect (IRLibrary::parseWirName ("Arena 1_MBg1v2").surround);
+        expect (IRLibrary::parseWirName ("Arena 1_SBg1v2").surround);
+        expect (IRLibrary::parseWirName ("Arena 1_MQg1v2").surround);
+        w = IRLibrary::parseWirName ("Unit7_s_Room_B");
+        expect (w.ok && ! w.sampled && ! w.surround);
+        expectEquals (w.name, String ("Room B"));
+        expectEquals (IRLibrary::parseWirName ("Synthetic_m_Round Hall").name, String ("Round Hall"));
+        expect (! IRLibrary::parseWirName ("My Room IR").ok);
+    }
+};
+
+/** A .wir file: a 32 bit float WAV file with the header renamed as in the WIR library. */
+static void writeWir (const File& file, const AudioBuffer<float>& buffer, double sampleRate)
+{
+    MemoryBlock block;
+    {
+        WavAudioFormat wav;
+        std::unique_ptr<OutputStream> out = std::make_unique<MemoryOutputStream> (block, false);
+        auto writer = wav.createWriterFor (out, AudioFormatWriterOptions{}.withSampleRate (sampleRate)
+                                                                    .withNumChannels (buffer.getNumChannels())
+                                                                    .withBitsPerSample (32)
+                                                                    .withSampleFormat (AudioFormatWriterOptions::SampleFormat::floatingPoint));
+        writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples());
+    }
+    auto* d = static_cast<uint8*> (block.getData());
+    std::memcpy (d, "wvIR", 4);
+    std::memcpy (d + 8, "ver1", 4);
+    for (size_t pos = 12; pos + 24 <= block.getSize();)
+    {
+        const auto size = ByteOrder::littleEndianInt (d + pos + 4);
+        if (std::memcmp (d + pos, "fmt ", 4) == 0) { d[pos + 8 + 14] = 23; break; }
+        pos += 8 + size + (size & 1);
+    }
+    file.replaceWithData (block.getData(), block.getSize());
+}
+
+class WIRFileTest : public UnitTest
+{
+public:
+    WIRFileTest() : UnitTest ("WIR files", "concert7-library") {}
+
+    void runTest() override
+    {
+        TemporaryFile tmp;
+        const auto root = tmp.getFile();
+        const auto space = root.getChildFile ("Lib/Sampled Acoustics V2/Concert Halls/Test Hall");
+        space.createDirectory();
+        const double sr = 96000.0;
+        auto make = [sr] (int channels) {
+            AudioBuffer<float> b (channels, (int) sr);
+            Random rng (channels);
+            for (int c = 0; c < channels; ++c)
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                    b.setSample (c, i, 1000.0f * (rng.nextFloat() * 2.0f - 1.0f) * std::exp (-6.9f * (float) i / (float) sr));
+            for (int c = 0; c < channels; ++c)
+                b.setSample (c, 100 + 50 * c, 3000.0f); // a marker per channel
+            return b;
+        };
+        const auto quad = make (4);
+        writeWir (space.getChildFile ("Test Hall_scg1v2.wir"), quad, sr);
+        writeWir (space.getChildFile ("Test Hall_xcg1v2.wir"), make (2), sr);
+        writeWir (space.getChildFile ("Test Hall_mcg1v2.wir"), make (1), sr);
+        writeWir (space.getChildFile ("Test Hall_MBg1v2.wir"), make (3), sr);
+        writeWir (space.getChildFile ("Test Hall_xcg2v2.wir"), make (2), sr);
+        writeWir (space.getChildFile ("Test Hall_sWg1v2.wir"), quad, sr);
+        // a preset names the position of the second position's files (the first has none, so keeps its number)
+        space.getChildFile ("Test Hall_Pt2v2.xps").replaceWithText (
+            "<?xml version=\"1.0\"?><PresetXMLTree><Preset Name=\"Test Hall (Row 18)\"><PresetData>"
+            "<PluginSpecific><Descriptors><Descriptor Name=\"IRFileNameFull\">Test Hall_xcg2v2.wir</Descriptor>"
+            "<Descriptor Name=\"MicLocation\">Row 18</Descriptor><Descriptor Name=\"Distance\">12.250</Descriptor>"
+            "</Descriptors></PluginSpecific></PresetData></Preset></PresetXMLTree>");
+        const auto synthetic = root.getChildFile ("Lib/Virtual Acoustics/Synthetic");
+        synthetic.createDirectory();
+        writeWir (synthetic.getChildFile ("Synthetic_m_Smooth_Hall.wir"), make (1), sr);
+        writeWir (synthetic.getChildFile ("Synthetic_S_Big Hall.wir"), make (4), sr);
+        const auto lx = root.getChildFile ("Lib/Virtual Acoustics/Devices/Unit7");
+        lx.createDirectory();
+        writeWir (lx.getChildFile ("Unit7_x_A_Plate.wir"), make (2), sr);
+        const auto nested = root.getChildFile ("Lib/Sampled Acoustics V2/Recording Studios/Studio A/Absorptive");
+        nested.createDirectory();
+        writeWir (nested.getChildFile ("Studio A - Absorptive_xcg1v2.wir"), make (2), sr);
+        writeWir (nested.getChildFile ("Studio A_x_Reverb Chamber.wir"), make (2), sr);
+        writeWir (root.getChildFile ("Lib/Odd name.wir"), make (2), sr);
+
+        beginTest ("reading a .wir file");
+        expectEquals (WIRAudioFormat::numChannels (space.getChildFile ("Test Hall_scg1v2.wir")), 4);
+        {
+            AudioFormatManager fm;
+            registerIRFormats (fm);
+            std::unique_ptr<AudioFormatReader> reader (fm.createReaderFor (space.getChildFile ("Test Hall_scg1v2.wir")));
+            expect (reader != nullptr);
+            if (reader != nullptr)
+            {
+                expectEquals ((int) reader->numChannels, 4);
+                expectEquals (reader->sampleRate, sr);
+                AudioBuffer<float> b (4, quad.getNumSamples());
+                reader->read (&b, 0, b.getNumSamples(), 0, true, true);
+                float maxDiff = 0.0f;
+                for (int c = 0; c < 4; ++c)
+                    for (int i = 0; i < b.getNumSamples(); ++i)
+                        maxDiff = std::max (maxDiff, std::abs (b.getSample (c, i) - quad.getSample (c, i)));
+                expectEquals (maxDiff, 0.0f);
+            }
+        }
+
+        beginTest ("scan: one preset per space, position and microphones, named by the positions the presets give");
+        IRLibrary lib;
+        lib.scan ({}, {}, root);
+        StringArray ids;
+        for (auto& p : lib.getPresets()) ids.add (p.id + "|" + p.category + "|" + p.name);
+        expectEquals (ids.joinIntoString (";"),
+                      String ("User/Lib/Sampled Acoustics V2/Concert Halls/Test Hall/1 Cardioid|Concert Halls|Test Hall 1 Cardioid;"
+                              "User/Lib/Sampled Acoustics V2/Concert Halls/Test Hall/1 Wide|Concert Halls|Test Hall 1 Wide;"
+                              "User/Lib/Sampled Acoustics V2/Concert Halls/Test Hall/2 Cardioid|Concert Halls|Test Hall - Row 18 (12 m) Cardioid;"
+                              "User/Lib/Virtual Acoustics/Devices/Unit7/A Plate|Devices|Unit7 A Plate;"
+                              "User/Lib/Odd name.wir|Lib|Odd name;"
+                              "User/Lib/Sampled Acoustics V2/Recording Studios/Studio A/Absorptive/1 Cardioid|Recording Studios|Studio A Absorptive 1 Cardioid;"
+                              "User/Lib/Sampled Acoustics V2/Recording Studios/Studio A/Absorptive/Reverb Chamber|Recording Studios|Studio A Absorptive Reverb Chamber;"
+                              "User/Lib/Virtual Acoustics/Synthetic/Big Hall|Synthetic|Big Hall;"
+                              "User/Lib/Virtual Acoustics/Synthetic/Smooth Hall|Synthetic|Smooth Hall"));
+        const auto* cardioid = lib.find ("User/Lib/Sampled Acoustics V2/Concert Halls/Test Hall/1 Cardioid");
+        expect (cardioid != nullptr && cardioid->variants.at (0).single.getFileName() == "Test Hall_scg1v2.wir");
+
+        beginTest ("loading: true stereo, wide microphones with their outputs swapped");
+        auto marker = [] (const std::vector<float>& x) {
+            return (int) std::distance (x.begin(), std::max_element (x.begin(), x.end(), [] (float a, float b) { return std::abs (a) < std::abs (b); }));
+        };
+        String err;
+        auto a = loadSourceIR (*cardioid, sr, err);
+        auto w = loadSourceIR (*lib.find ("User/Lib/Sampled Acoustics V2/Concert Halls/Test Hall/1 Wide"), sr, err);
+        expect (a != nullptr && w != nullptr, err);
+        if (a != nullptr && w != nullptr)
+        {
+            expect (a->trueStereo && w->trueStereo);
+            const int order[4] = { 1, 0, 3, 2 };
+            for (int c = 0; c < 4; ++c)
+            {
+                expectEquals (marker (a->ch[(size_t) c]), marker (a->ch[0]) + 50 * c);
+                expectEquals (marker (w->ch[(size_t) c]), marker (a->ch[0]) + 50 * order[c]);
+            }
+        }
     }
 };
 
@@ -284,5 +438,6 @@ public:
 };
 
 static LibraryParseTest libraryParseTest;
+static WIRFileTest wirFileTest;
 static LibraryScanTest libraryScanTest;
 } // namespace concert7::test

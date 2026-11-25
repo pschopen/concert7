@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **WIR library under OTHER**: Concert7 reads .wir files directly (no converted copies). A folder of the WIR
+  library becomes one preset per space, position and microphones (cardioid, omni, wide, binaural), sorted by its
+  kinds of spaces (Concert Halls, Churches …); of each preset the routing with the most channels is used (true
+  stereo, else mono to stereo, else mono). The B-format and surround sets are left out. A ZIP of the library can
+  be dropped onto the setup screen like any other archive. Where the library's presets (.xps) say where a
+  response was recorded, the preset is named by it, with the distance from the source where given
+  ("Example Hall - Row 12 Seat 20 (13 m) Cardioid"; 319 of 462 presets, 308 with a distance).
+- **Long preset names in two lines**: a name that does not fit the display at its smallest size is shown in two
+  lines (before the position where there is one) instead of running into the decay graph.
+- **Equal reverb level without the direct sound**: every preset is brought to the same level of its reverb; the
+  direct sound (from 1 ms before the first sound to 5 ms after) no longer counts. In rooms measured with a
+  loudspeaker it can hold most of the energy, which made their reverb quieter the closer the microphones were:
+  the sampled rooms of the WIR library are now 4 dB louder in the median (7.3 dB at the 90th percentile, at most
+  10 dB). The M7 libraries have hardly any direct sound and change by 0.03 dB in the median, at most 0.11 dB.
+
 ## 0.2.2-beta
 
 - **DECAY keeps the shape of a decay**: a decay that is not a straight line in dB (a faster start, a bend to a

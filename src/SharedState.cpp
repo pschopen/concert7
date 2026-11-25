@@ -130,7 +130,7 @@ namespace
     bool isAudio (const String& name)
     {
         return name.endsWithIgnoreCase (".wav") || name.endsWithIgnoreCase (".aif") || name.endsWithIgnoreCase (".aiff")
-            || name.endsWithIgnoreCase (".flac");
+            || name.endsWithIgnoreCase (".flac") || name.endsWithIgnoreCase (".wir");
     }
 
     /** The system's tar where it reads 7z (libarchive: macOS, Windows 10 and later, bsdtar on Linux). */

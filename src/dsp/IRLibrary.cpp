@@ -2,6 +2,7 @@
 // Copyright (C) 2026 pschopen, GPL-3.0-or-later
 
 #include "IRLibrary.h"
+#include "WIRFile.h"
 #include <regex>
 #include <algorithm>
 #include <cmath>
@@ -119,6 +120,32 @@ IRLibrary::ParsedSplit IRLibrary::parseSplitPath (const String& path)
     return p;
 }
 
+IRLibrary::ParsedWir IRLibrary::parseWirName (const String& fileNameWithoutExtension)
+{
+    // "Example Hall_scg1v2": routing, microphones, a letter of the version, position
+    static const std::regex sampled (R"(^(.+)_([mxsMS])([a-zA-Z])([gd])(\d+)(?:[vV]2)?$)");
+    // "Synthetic_s_Smooth Hall", "Unit7_x_Room_B"
+    static const std::regex virtualSpace (R"(^(.+?)_([mxsMS])_(.+)$)");
+    ParsedWir p;
+    std::smatch m;
+    const auto s = fileNameWithoutExtension.toStdString();
+    if (std::regex_match (s, m, sampled))
+    {
+        const char routing = m[2].str()[0], mic = m[3].str()[0];
+        p.ok = p.sampled = true;
+        p.position = std::stoi (m[5].str());
+        p.surround = routing == 'M' || routing == 'S' || mic == 'B' || mic == 'Q';
+        p.mic = mic == 'c' ? "Cardioid" : mic == 'o' ? "Omni" : mic == 'W' ? "Wide" : mic == 'd' ? "Binaural" : String::charToString ((juce_wchar) mic);
+        return p;
+    }
+    if (std::regex_match (s, m, virtualSpace))
+    {
+        p.ok = true;
+        p.name = String (m[3].str()).replaceCharacter ('_', ' ').trim();
+    }
+    return p;
+}
+
 IROrigin IRLibrary::originOfId (const String& presetId)
 {
     if (presetId.startsWith (kSplitPrefix)) return IROrigin::Split;
@@ -145,6 +172,72 @@ void IRLibrary::scan (const File& newFolder, const File& newSplitFolder, const F
     std::map<String, IRPreset> byId, splitById;
     std::vector<IRPreset> userPresets;
     std::set<String> userIds;
+
+    // the WIR library: of every preset the routing with the most channels (true stereo, mono to stereo, mono)
+    struct WirPick
+    {
+        IRPreset preset;
+        int channels = 0;
+        bool wide = false;
+        String space, mic;      // sampled spaces: for the name with the position the presets give
+        int position = 0;
+        WIRPosition where;
+    };
+    std::map<String, WirPick> wir;
+    std::map<File, std::map<String, WIRPosition>> positions; // of every folder, from its presets (.xps)
+    auto addWir = [&wir, &positions] (const File& file, const File& root, const ParsedWir& parsed) {
+        const int channels = WIRAudioFormat::numChannels (file);
+        if (channels != 1 && channels != 2 && channels != 4)
+            return;
+        // the kind of space: the folder inside "Sampled Acoustics V2" / "Virtual Acoustics" ("Concert Halls",
+        // "Synthetic"), else the folder around that of the space; the folders below it name the space
+        const auto dir = file.getParentDirectory();
+        File kind;
+        for (auto d = dir; d.isAChildOf (root) && kind == File(); d = d.getParentDirectory())
+        {
+            const auto above = d.getParentDirectory().getFileName();
+            if (above.startsWithIgnoreCase ("Sampled Acoustics") || above.startsWithIgnoreCase ("Virtual Acoustics"))
+                kind = d;
+        }
+        if (kind == File())
+            kind = parsed.sampled && dir.getParentDirectory().isAChildOf (root) ? dir.getParentDirectory() : dir;
+        StringArray space;
+        for (auto d = dir; d != kind && d.isAChildOf (kind); d = d.getParentDirectory())
+            space.insert (0, d.getFileName());
+        if (space.isEmpty() && parsed.sampled && kind.isAChildOf (root))
+            space.add (kind.getFileName());
+
+        const auto path = dir.isAChildOf (root) ? dir.getRelativePathFrom (root).replaceCharacter ('\\', '/') + "/" : String();
+        const auto own = parsed.sampled ? String (parsed.position) + " " + parsed.mic : parsed.name;
+        IRPreset preset;
+        preset.categoryOrder = 100;
+        preset.category = kind.isAChildOf (root) ? kind.getFileName() : String ("User");
+        preset.name = (space.isEmpty() ? String() : space.joinIntoString (" ") + " ") + own;
+        preset.id = "User/" + path + own;
+        preset.variants[0].single = file;
+
+        WIRPosition where;
+        if (parsed.sampled)
+        {
+            auto it = positions.find (dir);
+            if (it == positions.end())
+                it = positions.emplace (dir, readWIRPositions (dir)).first;
+            if (auto p = it->second.find (file.getFileName().toLowerCase()); p != it->second.end())
+                where = p->second;
+        }
+
+        auto& pick = wir[preset.id];
+        const bool better = channels > pick.channels
+                         || (channels == pick.channels && file.getFileName() < pick.preset.variants[0].single.getFileName());
+        if (better)
+        {
+            // the position stays where only another routing of it names one
+            if (where.location.isEmpty()) where = pick.where;
+            pick = { std::move (preset), channels, parsed.mic == "Wide", space.joinIntoString (" "), parsed.mic, parsed.position, where };
+        }
+        else if (pick.where.location.isEmpty())
+            pick.where = where;
+    };
 
     // split captures: one preset per folder, early reflections and late reverb per take
     auto addSplit = [&splitById] (const File& file, const ParsedSplit& parsed) {
@@ -183,7 +276,7 @@ void IRLibrary::scan (const File& newFolder, const File& newSplitFolder, const F
         }
 
     for (auto& root : roots)
-        for (const auto& entry : RangedDirectoryIterator (root, true, "*.wav;*.aif;*.aiff;*.flac", File::findFiles))
+        for (const auto& entry : RangedDirectoryIterator (root, true, "*.wav;*.aif;*.aiff;*.flac;*.wir", File::findFiles))
         {
             const auto file = entry.getFile();
             if (file.getFileName().startsWithChar ('.'))
@@ -194,6 +287,14 @@ void IRLibrary::scan (const File& newFolder, const File& newSplitFolder, const F
                 addSplit (file, split);
                 continue;
             }
+            if (file.hasFileExtension ("wir"))
+                if (const auto w = parseWirName (file.getFileNameWithoutExtension()); w.ok)
+                {
+                    if (! w.surround)
+                        addWir (file, root, w);
+                    continue;
+                }
+
             const auto parsed = parseFileName (file.getFileNameWithoutExtension());
             if (parsed.ok)
             {
@@ -225,6 +326,31 @@ void IRLibrary::scan (const File& newFolder, const File& newSplitFolder, const F
                     userPresets.push_back (std::move (preset));
             }
         }
+
+    // sampled spaces named by where they were recorded ("Example Hall - Row 12 Seat 20 (12 m) Cardioid"), with
+    // the position's number where the presets give none or two positions of a space would have the same name
+    std::map<String, int> names;
+    auto positionName = [] (const WirPick& pick) {
+        const auto location = pick.where.location.retainCharacters (
+            " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~");
+        if (pick.mic.isEmpty() || location.trim().isEmpty() || location.trim().equalsIgnoreCase ("Default"))
+            return String();
+        const auto d = pick.where.distance;
+        const auto distance = d <= 0.0f ? String() : " (" + (d < 10.0f ? String (d, 1) : String (roundToInt (d))) + " m)";
+        return (pick.space.isNotEmpty() ? pick.space + " - " : String()) + location.trim() + distance + " " + pick.mic;
+    };
+    for (auto& [id, pick] : wir)
+        if (const auto n = positionName (pick); n.isNotEmpty())
+            ++names[pick.preset.category + "/" + n];
+    for (auto& [id, pick] : wir)
+    {
+        // wide microphones: the direct sound of each side is on the other output
+        pick.preset.variants[0].swapOutputs = pick.wide && pick.channels == 4;
+        if (const auto n = positionName (pick); n.isNotEmpty())
+            pick.preset.name = names[pick.preset.category + "/" + n] > 1 ? n + " " + String (pick.position) : n;
+        if (userIds.insert (id).second)
+            userPresets.push_back (std::move (pick.preset));
+    }
 
     auto byOrder = [] (const IRPreset& a, const IRPreset& b) {
         if (a.categoryOrder != b.categoryOrder) return a.categoryOrder < b.categoryOrder;

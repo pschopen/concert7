@@ -90,12 +90,40 @@ public:
             expectWithinAbsoluteError (src->onset, (int) (0.05 * sr), (int) (0.002 * sr));
         }
 
-        beginTest ("normalisation: white noise in gives -6 dB out");
+        // the energy of the reverb: from 6 ms after the onset on (the direct sound left out)
+        auto reverbEnergy = [&] (const SourceIR& src) {
+            double p = 0.0;
+            for (auto* c : chans (src.ch))
+                for (size_t n = (size_t) (src.onset + (int) std::lround (0.006 * sr)); n < c->size(); ++n)
+                    p += (double) (*c)[n] * (*c)[n];
+            return p;
+        };
+
+        beginTest ("normalisation: white noise in gives -6 dB reverb out");
         {
             auto src = makeSourceIR (syntheticIR (2.0f, 3.0f, sr, 9), true, sr, sr, "norm");
-            double p = 0.0;
-            for (auto* c : chans (src->ch)) p += energy (*c);
-            expectWithinAbsoluteError (p * 0.5, 0.25, 1e-3);
+            expectWithinAbsoluteError (reverbEnergy (*src) * 0.5, 0.25, 1e-3);
+        }
+
+        beginTest ("normalisation: a strong direct sound does not make the reverb quieter");
+        {
+            auto plain = syntheticIR (2.0f, 3.0f, sr, 9);
+            auto loud = plain;
+            const auto onset = (size_t) (0.01 * sr);
+            for (size_t c : { (size_t) 0, (size_t) 3 })
+                for (size_t i = 0; i < 48; ++i)
+                    loud[c][onset + i] += 40.0f * std::exp (-0.1f * (float) i); // most of the energy in the first ms
+            double whole = 0.0, direct = 0.0;
+            for (auto& c : loud)
+                for (size_t n = 0; n < c.size(); ++n)
+                {
+                    whole += (double) c[n] * c[n];
+                    if (n < onset + (size_t) (0.005 * sr)) direct += (double) c[n] * c[n];
+                }
+            expectGreaterThan (direct / whole, 0.5, "the test's direct sound dominates");
+            auto a = makeSourceIR (plain, true, sr, sr, "plain");
+            auto b = makeSourceIR (loud, true, sr, sr, "direct");
+            expectWithinAbsoluteError (10.0 * std::log10 (reverbEnergy (*b) / reverbEnergy (*a)), 0.0, 0.05);
         }
     }
 };

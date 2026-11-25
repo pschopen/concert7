@@ -12,7 +12,7 @@
 //   concert7-dev snapshot --out UI.png [--tab 0..4] [--welcome] [--preset ID] [--scale S] [--keep decay,output]
 //                         [--browser SEARCH]
 //   concert7-dev bench    [--preset ID] [--seconds S] [--block N] [--sr RATE] [--lowcpu] [--undersample] [--realtime] [--set ...]
-//   concert7-dev presets  [--irs DIR]            (lists presets with their analysed reverb times)
+//   concert7-dev presets  [--irs DIR] [--own DIR] (lists presets with their analysed reverb times)
 //   concert7-dev analyze  --preset ID [--sr RATE] (per band analysis of one preset)
 //   concert7-dev fingerprint [--sr RATE]         (hashes of designed responses of synthetic sources over a matrix
 //                                                 of settings: the same before and after a change of the designer
@@ -828,11 +828,12 @@ namespace
         return 0;
     }
 
-    int listPresets (const ArgumentList&)
+    int listPresets (const ArgumentList& args)
     {
         SharedResourcePointer<SharedState> shared;
         if (test::irFolder().isDirectory()) shared->setIRFolder (test::irFolder());
         if (test::splitFolder().isDirectory()) shared->setSplitFolder (test::splitFolder());
+        if (hasArg (args, "--own")) shared->setOwnFolder (fileArg (args, "--own"));
         for (int i = 0; i < shared->getNumPresets(); ++i)
         {
             IRPreset p;
@@ -840,7 +841,8 @@ namespace
             String err;
             auto src = loadSourceIR (p, 48000.0, err);
             std::cout << p.id.paddedRight (' ', 34) << " "
-                      << (src ? String (src->nativeRT, 2) + " s" : "ERROR " + err) << std::endl;
+                      << (src ? String (src->nativeRT, 2) + " s" + (src->trueStereo ? " true stereo" : "") : "ERROR " + err)
+                      << "  [" << p.category << "] " << p.name << std::endl;
         }
         return 0;
     }

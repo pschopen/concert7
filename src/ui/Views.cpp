@@ -106,10 +106,37 @@ void PresetDisplay::paint (Graphics& g)
         g.fillEllipse (inner.getRight() - DotMatrix::textWidth (info, small) - d * 2.5f, inner.getY() + small * 2.5f, d, d);
     }
 
-    float big = std::min (inner.getHeight() / 17.0f, inner.getWidth() / std::max (1.0f, line2.length() * 6.0f - 1.0f));
-    big = std::max (1.6f, big);
-    const float y2 = inner.getCentreY() - big * 4.0f;
-    DotMatrix::drawText (g, line2, inner.getX(), y2, big, on, off);
+    auto fitPitch = [&inner] (const String& text) {
+        return inner.getWidth() / std::max (1.0f, text.length() * 6.0f - 1.0f);
+    };
+    float big = std::min (inner.getHeight() / 17.0f, fitPitch (line2));
+    if (big >= 1.6f)
+    {
+        const float y2 = inner.getCentreY() - big * 4.0f;
+        DotMatrix::drawText (g, line2, inner.getX(), y2, big, on, off);
+    }
+    else
+    {
+        // a long name in two lines: before the position ("City Concert Hall - Large" / "Row 18 Cardioid"), the last
+        // " - ", where that leaves no line with much more than half of it, else at the space nearest the middle
+        const int n = line2.length();
+        int cut = line2.lastIndexOf (" - ");
+        if (cut < 0 || std::max (cut, n - cut - 3) > (int) (0.62f * (float) n))
+        {
+            cut = -1;
+            for (int i = 0; i < n; ++i)
+                if (line2[i] == ' ' && (cut < 0 || std::abs (i - n / 2) < std::abs (cut - n / 2)))
+                    cut = i;
+        }
+        auto first = cut >= 0 ? line2.substring (0, cut).trimEnd() : line2;
+        auto second = cut >= 0 ? line2.substring (cut).trimStart() : String();
+        if (first.endsWith (" -")) first = first.dropLastCharacters (2);
+        if (second.startsWith ("- ")) second = second.substring (2);
+        const float pitch = std::max (1.2f, std::min ({ inner.getHeight() / 26.0f, fitPitch (first), fitPitch (second) }));
+        const float y2 = inner.getCentreY() - pitch * 8.5f;
+        DotMatrix::drawText (g, first, inner.getX(), y2, pitch, on, off);
+        DotMatrix::drawText (g, second, inner.getX(), y2 + pitch * 9.0f, pitch, on, off);
+    }
 
     auto line3Pitch = std::min (small, inner.getWidth() / std::max (1.0f, line3.length() * 6.0f));
     DotMatrix::drawText (g, line3, inner.getX(), inner.getBottom() - 7.0f * line3Pitch, line3Pitch,
@@ -1108,9 +1135,9 @@ void WelcomeOverlay::paint (Graphics& g)
     if (library == IROrigin::User)
     {
         paintStep (g, step1, 1, installed, tr ("Choose a folder with impulse responses", u8"Ordner mit Impulsantworten wählen"),
-                   tr ("Another library or your own: WAV, AIFF, FLAC, mono to 4 channels (true stereo). Subfolders "
+                   tr ("Another library or your own: WAV, AIFF, FLAC, WIR, mono to 4 channels (true stereo). Subfolders "
                        "become categories.",
-                       u8"Eine andere Bibliothek oder eigene: WAV, AIFF, FLAC, mono bis 4 Kanäle (True Stereo). "
+                       u8"Eine andere Bibliothek oder eigene: WAV, AIFF, FLAC, WIR, mono bis 4 Kanäle (True Stereo). "
                        u8"Unterordner werden Kategorien."));
         auto step2 = r.removeFromTop (58.0f);
         paintStep (g, step2, 2, installed, tr ("Or drop an archive (ZIP or 7z)", u8"Oder ein Archiv ablegen (ZIP oder 7z)"),

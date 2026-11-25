@@ -164,7 +164,7 @@ namespace
             { "Ambiences", "Very short reverb that adds space without an audible tail." },
             { "Spaces", "Real places - churches, a scoring stage, an arena, a car park, a cavern, outdoor spaces - "
                         "and a gated reverb." },
-            { "User", "Your own impulse responses (WAV, AIFF, FLAC) that are not in a subfolder." },
+            { "User", "Your own impulse responses (WAV, AIFF, FLAC, WIR) that are not in a subfolder." },
         };
         const auto it = tips.find (category);
         return it != tips.end() ? it->second : "Presets in " + category;

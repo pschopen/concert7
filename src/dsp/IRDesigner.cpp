@@ -6,6 +6,7 @@
 #include "AudioFFT.h"
 #include "Distance.h"
 #include "PostProcessing.h"
+#include "WIRFile.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <cmath>
 #include <future>
@@ -27,6 +28,9 @@ namespace
     constexpr float kVlfCrossoverHz   = 120.0f;
     constexpr float kNormTargetPower  = 0.25f;  // white noise in -> -6 dB wet out (at kNormRate)
     constexpr double kNormRate        = 48000.0; // the same frequency response at every host rate
+    constexpr float kDirectSeconds    = 0.006f; // the level is that of the reverb: the direct sound (1 ms before the
+                                                // first sound to 5 ms after) is left out of the normalisation
+    constexpr double kMinReverbShare  = 0.1;    // ... at most 10 dB louder than with the whole response
     constexpr int   kCrossfadeFrames  = 4;      // measured -> synthesised tail (DecayMode::Original)
     constexpr float kCrossfadeSeconds = 0.2f;   // measured -> synthesised tail
     constexpr float kMaxBoostDb       = 120.0f; // numeric guard only, the band cap does the real limiting
@@ -1046,7 +1050,8 @@ namespace
 /** makeSourceIR of one response (parts[0]) or of its blocks (parts: early, late and, if any, another take of the
     late reverb). All parts are trimmed and resampled alike and get the same gain, the whole response's. */
 std::shared_ptr<SourceIR> makeSource (std::vector<std::array<std::vector<float>, 4>> parts, bool trueStereo,
-                                      double sourceRate, double hostRate, const String& name, float gainDb)
+                                      double sourceRate, double hostRate, const String& name, float gainDb,
+                                      float directScale)
 {
     auto src = std::make_shared<SourceIR>();
     src->name = name;
@@ -1102,12 +1107,20 @@ std::shared_ptr<SourceIR> makeSource (std::vector<std::array<std::vector<float>,
     else
         src->ch = parts[0];
 
-    // equal loudness for all presets: average output power for white noise input. The sum of squares of the
-    // same response grows with the rate it is sampled at; scaled to kNormRate the level is the same at every rate.
-    double power = 0.0;
+    // equal loudness for all presets: average output power of the reverb for white noise input. The direct sound
+    // is left out: in a room measured with a loudspeaker it can hold most of the energy and would make the reverb
+    // quieter the closer the microphones were. The sum of squares of the same response grows with the rate it is
+    // sampled at; scaled to kNormRate the level is the same at every rate.
+    const auto reverbStart = (size_t) (detectOnset (src->ch, hostRate) + (int) std::lround (kDirectSeconds * directScale * hostRate));
+    double whole = 0.0, reverb = 0.0;
     for (auto* c : activeChannels (src->ch, trueStereo))
-        for (float v : *c) power += (double) v * v;
-    power *= 0.5 * hostRate / kNormRate;
+        for (size_t n = 0; n < c->size(); ++n)
+        {
+            const double e = (double) (*c)[n] * (*c)[n];
+            whole += e;
+            if (n >= reverbStart) reverb += e;
+        }
+    double power = std::max (reverb, kMinReverbShare * whole) * 0.5 * hostRate / kNormRate;
     if (power > 1e-20)
     {
         const float g = (float) std::sqrt (kNormTargetPower / power * std::pow (10.0, gainDb / 10.0));
@@ -1141,23 +1154,24 @@ std::shared_ptr<SourceIR> makeSource (std::vector<std::array<std::vector<float>,
 } // namespace
 
 std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channels, bool trueStereo,
-                                        double sourceRate, double hostRate, const String& name, float gainDb)
+                                        double sourceRate, double hostRate, const String& name, float gainDb,
+                                        float directScale)
 {
     std::vector<std::array<std::vector<float>, 4>> parts;
     parts.push_back (std::move (channels));
-    return makeSource (std::move (parts), trueStereo, sourceRate, hostRate, name, gainDb);
+    return makeSource (std::move (parts), trueStereo, sourceRate, hostRate, name, gainDb, directScale);
 }
 
 std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> early, std::array<std::vector<float>, 4> late,
                                         std::array<std::vector<float>, 4> lateTake, bool trueStereo, double sourceRate,
-                                        double hostRate, const String& name, float gainDb)
+                                        double hostRate, const String& name, float gainDb, float directScale)
 {
     std::vector<std::array<std::vector<float>, 4>> parts;
     parts.push_back (std::move (early));
     parts.push_back (std::move (late));
     if (! lateTake[0].empty())
         parts.push_back (std::move (lateTake));
-    return makeSource (std::move (parts), trueStereo, sourceRate, hostRate, name, gainDb);
+    return makeSource (std::move (parts), trueStereo, sourceRate, hostRate, name, gainDb, directScale);
 }
 
 namespace
@@ -1230,7 +1244,7 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
 {
     const auto variant = preset.bestVariantFor (hostRate).second;
     AudioFormatManager fm;
-    fm.registerBasicFormats();
+    registerIRFormats (fm);
 
     auto readFile = [&] (const File& f, AudioBuffer<float>& buf, double& sr) { return readAudioFile (fm, f, buf, sr, error); };
     auto chan = fileChannel;
@@ -1291,6 +1305,11 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
         {
             for (int c = 0; c < 4; ++c) ch[(size_t) c] = chan (a, c);
             trueStereo = true;
+            if (variant.swapOutputs)
+            {
+                std::swap (ch[0], ch[1]);
+                std::swap (ch[2], ch[3]);
+            }
         }
         else
         {
@@ -1340,7 +1359,7 @@ bool loadSourceTakes (const IRPreset& preset, SourceIR& src, String& error)
     auto load = [&src] (File f) {
         Loaded r;
         AudioFormatManager fm;
-        fm.registerBasicFormats();
+        registerIRFormats (fm);
         AudioBuffer<float> b;
         double sr = 0.0;
         if (! readAudioFile (fm, f, b, sr, r.error))
@@ -2231,8 +2250,8 @@ std::shared_ptr<const SourceIR> stretchedSource (const SourceIR& src, float fact
     // taken as recorded at 1 / factor of its rate and resampled back, the response lasts factor times as long
     const float gainDb = (1.0f - kLateLevelSlope) * 10.0f * std::log10 (factor);
     auto st = src.hasBlocks() ? makeSourceIR (src.earlyBlock, src.lateBlock, src.lateTake, src.trueStereo, src.sampleRate / factor,
-                                              src.sampleRate, src.name, gainDb)
-                              : makeSourceIR (src.ch, src.trueStereo, src.sampleRate / factor, src.sampleRate, src.name, gainDb);
+                                              src.sampleRate, src.name, gainDb, factor)
+                              : makeSourceIR (src.ch, src.trueStereo, src.sampleRate / factor, src.sampleRate, src.name, gainDb, factor);
     st->presetId = src.presetId;
     // the other takes, stretched alike
     if (src.takesLoaded)

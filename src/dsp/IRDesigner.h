@@ -198,16 +198,19 @@ std::shared_ptr<SourceIR> loadSourceIR (const IRPreset& preset, double hostRate,
     load). The takes are made like the blocks; a take that equals the first is left out. */
 bool loadSourceTakes (const IRPreset& preset, SourceIR& src, juce::String& error);
 
-/** Builds a SourceIR from raw channels (used for user files and tests). Normalised to the same loudness for every
-    response, gainDb (energy) on top. */
+/** Builds a SourceIR from raw channels (used for user files and tests). Normalised to the same loudness of the
+    reverb for every response (without the direct sound, the first kDirectSeconds x directScale from the onset; a
+    copy stretched in time passes its factor), gainDb (energy) on top. */
 std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> channels, bool trueStereo,
-                                        double sourceRate, double hostRate, const juce::String& name, float gainDb = 0.0f);
+                                        double sourceRate, double hostRate, const juce::String& name, float gainDb = 0.0f,
+                                        float directScale = 1.0f);
 
 /** The same from the early reflections and the late reverb recorded on their own (split captures): ch is
     their sum at the files' levels. lateTake (may be empty): another take of the late reverb. */
 std::shared_ptr<SourceIR> makeSourceIR (std::array<std::vector<float>, 4> early, std::array<std::vector<float>, 4> late,
                                         std::array<std::vector<float>, 4> lateTake, bool trueStereo, double sourceRate,
-                                        double hostRate, const juce::String& name, float gainDb = 0.0f);
+                                        double hostRate, const juce::String& name, float gainDb = 0.0f,
+                                        float directScale = 1.0f);
 
 /** Fills the analysis fields of a SourceIR. Called by loadSourceIR / makeSourceIR. */
 void analyseSourceIR (SourceIR& src);
