@@ -144,11 +144,34 @@ namespace
         return { "bsdtar", "tar" };
        #endif
     }
+
+    /** A ZIP that JUCE's ZipFile reads: not a 7z, and not a Zip64 archive (over 4 GB or 65535 entries), whose
+        central directory JUCE would look for at the wrong place. Those go to the system's tar like a 7z. */
+    bool readableByZipFile (const File& archive)
+    {
+        if (archive.hasFileExtension ("7z")) return false;
+        FileInputStream in (archive);
+        if (! in.openedOk()) return false;
+        const int64 length = in.getTotalLength();
+        const int tail = (int) std::min<int64> (length, 22 + 65535 + 20);
+        HeapBlock<uint8> buffer ((size_t) tail);
+        in.setPosition (length - tail);
+        if (in.read (buffer, tail) != tail) return false;
+        for (int i = tail - 22; i >= 0; --i)
+            if (ByteOrder::littleEndianInt (buffer + i) == 0x06054b50)
+            {
+                // the Zip64 end of central directory locator sits right before the classic record
+                if (i >= 20 && ByteOrder::littleEndianInt (buffer + i - 20) == 0x07064b50) return false;
+                return ByteOrder::littleEndianInt (buffer + i + 16) != 0xffffffffu
+                    && ByteOrder::littleEndianShort (buffer + i + 10) != 0xffff;
+            }
+        return true; // no end record: ZipFile finds nothing and the caller falls back on its own
+    }
 }
 
 int IRInstaller::countBankEntries (const File& zipFile)
 {
-    if (! zipFile.existsAsFile()) return -1;
+    if (! zipFile.existsAsFile() || ! readableByZipFile (zipFile)) return -1;
     ZipFile archive (zipFile);
     if (archive.getNumEntries() == 0) return -1;
     int count = 0;
@@ -163,7 +186,7 @@ bool IRInstaller::listArchive (const File& archive, StringArray& names)
 {
     names.clear();
     if (! archive.existsAsFile()) return false;
-    if (! archive.hasFileExtension ("7z"))
+    if (readableByZipFile (archive))
     {
         ZipFile z (archive);
         for (int i = 0; i < z.getNumEntries(); ++i)
@@ -210,7 +233,8 @@ bool IRInstaller::extractArchive (const File& zipFile, const File& dest,
     }
     const bool split = detect (names) == Kind::Split;
 
-    if (zipFile.hasFileExtension ("7z"))
+    // a 7z, a Zip64 archive, or a ZIP that JUCE's ZipFile cannot open
+    if (! readableByZipFile (zipFile) || ZipFile (zipFile).getNumEntries() == 0)
     {
         // the system's tar unpacks it (into dest, with the archive's own folder); its listing counts the progress
         int total = 0;
@@ -253,7 +277,8 @@ bool IRInstaller::extractArchive (const File& zipFile, const File& dest,
             errorMessage = "tar could not unpack the archive.";
             return false;
         }
-        errorMessage = "No program to unpack 7z archives was found.";
+        errorMessage = zipFile.hasFileExtension ("7z") ? "No program to unpack 7z archives was found."
+                                                       : "The archive could not be opened.";
         return false;
     }
 

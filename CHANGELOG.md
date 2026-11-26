@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **ZIP archives over 4 GB**: a Zip64 archive (over 4 GB or 65535 entries, such as the complete WIR library) is
+  unpacked by the system's tar like a 7z; before, it could not be opened.
+
 ## 0.3.0-beta
 
 - **WIR library under OTHER**: Concert7 reads .wir files directly (no converted copies). A folder of the WIR
