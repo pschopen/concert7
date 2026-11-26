@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1-beta
 
 - **ZIP archives over 4 GB**: a Zip64 archive (over 4 GB or 65535 entries, such as the complete WIR library) is
   unpacked by the system's tar like a 7z; before, it could not be opened.
